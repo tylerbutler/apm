@@ -1,0 +1,247 @@
+name: Benchmark Matrix
+
+on:
+  pull_request:
+    branches: [ main ]
+  schedule:
+    - cron: '23 4 * * *'
+    - cron: '47 5 * * 0'
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: Benchmark profile to run
+        required: true
+        default: smoke
+        type: choice
+        options:
+          - smoke
+          - full
+          - live
+          - all
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  PYTHON_VERSION: '3.12'
+
+jobs:
+  smoke:
+    name: Benchmark Smoke
+    if: >-
+      github.event_name == 'pull_request' ||
+      (github.event_name == 'workflow_dispatch' &&
+      (inputs.profile == 'smoke' || inputs.profile == 'all'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+
+      - name: Install frozen development dependencies
+        run: uv sync --frozen --extra dev
+
+      - name: Fetch previous full-main baseline
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          uv run --frozen --no-sync python -m scripts.perf.benchmark_matrix
+          download-baseline --repository "${{ github.repository }}"
+          --current-run-id "${{ github.run_id }}" --destination baseline
+          --allow-missing
+
+      - name: Run smoke benchmark matrix
+        run: >-
+          uv run --frozen --no-sync python -m scripts.perf.benchmark_matrix
+          run --profile smoke --output results.json
+
+      - name: Compare with full-main baseline
+        if: ${{ hashFiles('baseline/results.json') != '' }}
+        run: >-
+          uv run --frozen --no-sync python -m scripts.perf.benchmark_matrix
+          compare results.json baseline/results.json > comparison.json
+
+      - name: Render comparison summary
+        if: ${{ hashFiles('baseline/results.json') != '' }}
+        run: |
+          uv run --frozen --no-sync python -m scripts.perf.benchmark_matrix \
+            summary comparison.json > summary.md
+          cat summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Render no-baseline summary
+        if: ${{ hashFiles('baseline/results.json') == '' }}
+        run: |
+          uv run --frozen --no-sync python -m scripts.perf.benchmark_matrix \
+            summarize-results results.json > summary.md
+          cat summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload smoke benchmark artifacts (compared)
+        if: ${{ hashFiles('baseline/results.json') != '' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: benchmark-smoke
+          path: |
+            results.json
+            comparison.json
+            summary.md
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload smoke benchmark artifacts (bootstrap)
+        if: ${{ hashFiles('baseline/results.json') == '' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: benchmark-smoke
+          path: |
+            results.json
+            summary.md
+          if-no-files-found: error
+          retention-days: 14
+
+  full:
+    name: Benchmark Full
+    if: >-
+      (github.event_name == 'schedule' &&
+      github.event.schedule == '23 4 * * *') ||
+      (github.event_name == 'workflow_dispatch' &&
+      (inputs.profile == 'full' || inputs.profile == 'all'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+
+      - name: Install frozen development dependencies
+        run: uv sync --frozen --extra dev
+
+      - name: Fetch previous full-main baseline
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          uv run --frozen --no-sync python -m scripts.perf.benchmark_matrix
+          download-baseline --repository "${{ github.repository }}"
+          --current-run-id "${{ github.run_id }}" --destination baseline
+          --allow-missing
+
+      - name: Run full benchmark matrix
+        run: >-
+          uv run --frozen --no-sync python -m scripts.perf.benchmark_matrix
+          run --profile full --output results.json
+
+      - name: Compare with full-main baseline
+        if: ${{ hashFiles('baseline/results.json') != '' }}
+        run: >-
+          uv run --frozen --no-sync python -m scripts.perf.benchmark_matrix
+          compare results.json baseline/results.json > comparison.json
+
+      - name: Render comparison summary
+        if: ${{ hashFiles('baseline/results.json') != '' }}
+        run: |
+          uv run --frozen --no-sync python -m scripts.perf.benchmark_matrix \
+            summary comparison.json > summary.md
+          cat summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Render no-baseline summary
+        if: ${{ hashFiles('baseline/results.json') == '' }}
+        run: |
+          uv run --frozen --no-sync python -m scripts.perf.benchmark_matrix \
+            summarize-results results.json > summary.md
+          cat summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload full benchmark artifacts (compared)
+        if: ${{ hashFiles('baseline/results.json') != '' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ github.ref == 'refs/heads/main' && 'benchmark-full-main' || 'benchmark-full-dispatch' }}
+          path: |
+            results.json
+            comparison.json
+            summary.md
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Upload full benchmark artifacts (bootstrap)
+        if: ${{ hashFiles('baseline/results.json') == '' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ github.ref == 'refs/heads/main' && 'benchmark-full-main' || 'benchmark-full-dispatch' }}
+          path: |
+            results.json
+            summary.md
+          if-no-files-found: error
+          retention-days: 90
+
+  live:
+    name: Benchmark Live
+    if: >-
+      (github.event_name == 'schedule' &&
+      github.event.schedule == '47 5 * * 0') ||
+      (github.event_name == 'workflow_dispatch' &&
+      (inputs.profile == 'live' || inputs.profile == 'all'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+
+      - name: Install frozen development dependencies
+        run: uv sync --frozen --extra dev
+
+      - name: Run live benchmark matrix
+        run: >-
+          uv run --frozen --no-sync python -m scripts.perf.benchmark_matrix
+          run --profile live --allow-network --output results.json
+
+      - name: Render live benchmark summary
+        run: |
+          uv run --frozen --no-sync python -m scripts.perf.benchmark_matrix \
+            summarize-results results.json > summary.md
+          cat summary.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload live benchmark artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: benchmark-live
+          path: |
+            results.json
+            summary.md
+          if-no-files-found: error
+          retention-days: 30

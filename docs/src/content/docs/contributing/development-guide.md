@@ -171,6 +171,11 @@ uv run pytest tests/unit -x -v
 to force serial execution. The default selection in `pyproject.toml` excludes
 `benchmark` and `live` tests.
 
+For source-CLI timing work, use the Linux x86_64
+[performance benchmark matrix](../performance-benchmarks/). That page defines
+the smoke, full, and live profiles, baseline behavior, and CI artifacts. Timing
+changes are advisory. Existing scaling guards remain hard merge-time gates.
+
 Without `uv`, use a standard Python venv and pip:
 
 ```bash

@@ -109,6 +109,33 @@ test's boundary, scheduling, or precondition, only that
 `ci.yml`'s required `lifecycle-smoke` job selects it via
 `-m lifecycle_smoke` (see Tier 3 above for the full rationale).
 
+### Performance selections
+
+Performance checks use three separate selections:
+
+| Selection | Mechanism | Merge effect |
+| --- | --- | --- |
+| Scaling guards | `tests/benchmarks/test_scaling_guards.py` runs in the normal suite without the `benchmark` marker | Hard merge-time gate |
+| Hermetic source-CLI matrix | The benchmark harness selects PR smoke or scheduled/manual full profiles | Command, correctness, and harness failures fail; timing regressions are advisory |
+| Live source-CLI matrix | The harness selects a separate live GitHub profile | Non-gating performance evidence |
+
+The `benchmark` marker selects existing pytest microbenchmarks that are
+deselected by default. It does not select the source-CLI matrix. The matrix
+profiles belong to the
+[performance benchmark harness](../performance-benchmarks/), not to the pytest
+marker registry.
+
+Do not mark scaling guards as `benchmark`: they must continue to run as hard
+performance gates. Do not compare live GitHub observations with the hermetic
+baseline. The latest compatible, successful scheduled/manual full artifact
+from `main` is the source-CLI timing baseline. Smoke and full always run when
+selected, even if no compatible baseline exists. The linked benchmark page
+defines the profile rows, sample counts, report validation, and artifact flow.
+
+Existing pytest scenarios marked `live` are also observational tests of
+external services. Select them with `-m live`; they are not benchmark-matrix
+rows.
+
 The behavioral definitions are:
 
 | Marker | Definition |
