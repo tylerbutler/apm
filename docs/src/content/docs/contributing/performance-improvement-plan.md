@@ -10,7 +10,7 @@ the [performance benchmark matrix](../performance-benchmarks/) for all
 comparison runs.
 
 :::note[Implemented]
-Phases 1-5 are complete. This page keeps the technical plan and local results
+Phases 1-7 are complete. This page keeps the technical plan and local results
 as historical context. The targets and results remain advisory until they are
 compared with a controlled CI baseline.
 :::
@@ -31,7 +31,8 @@ The implemented first wave executed in this order:
 Do not combine phases in one change. Separate changes make timing and
 correctness regressions easier to isolate.
 
-Phase 6 is implemented. Evaluate each remaining second-wave item in order.
+Phases 6 and 7 are implemented. Evaluate each remaining second-wave item in
+order.
 
 ## Measured evidence
 
@@ -393,11 +394,42 @@ altering auth and fallback behavior.
 - In two controlled large-update runs, median resolver time improves beyond
   benchmark noise and no unrelated benchmark row regresses.
 
+### Phase 7: Bound concurrent update ref resolution
+
+**Status:** Implemented. Controlled large-update comparison remains pending.
+
+**Evidence status:** The update-plan annotation pass previously called
+`resolve_git_reference` serially for every eligible dependency. It now uses the
+existing `parallel_downloads` bound while retaining the tiered resolver as the
+single owner of normalized `(url, ref)` coalescing.
+
+**Behavior preserved:**
+
+- Results are assigned to dependency objects in input order.
+- `max_workers=1` retains the sequential parity path.
+- `executor.map` preserves the first input-order exception and its original
+  type and message.
+- Local, registry, proxy, and already-resolved dependencies remain excluded.
+- Authentication and transport continue through `GitHubPackageDownloader`,
+  `TieredRefResolver`, and `AuthResolver`; no second network path was added.
+
+**Acceptance evidence:**
+
+- A unit guard forces three workers to overlap and observes a maximum of exactly
+  three in-flight resolutions.
+- Concurrent duplicate refs still perform one underlying resolve per
+  normalized key through tiered single-flight coalescing.
+- A deterministic 8-unique-ref, 16-dependency proxy with 30 ms per remote
+  operation measured a 0.2418 s serial median and a 0.0615 s four-worker median
+  across five runs, a 3.93x speedup, while preserving eight underlying remote
+  operations in both modes.
+- The controlled network profile is still required to quantify real
+  large-update wall-time and rate-limit effects.
+
 ### Ordered follow-on work
 
 | Phase | Opportunity and status | Impact and risk | Acceptance measurements |
 | ---: | --- | --- | --- |
-| 7 | **Bound concurrent update ref resolution.** **Evidence:** serial independent ref work is measured; wall-time gain remains a hypothesis until a network profile. | High potential on multi-package updates. Bound workers to avoid rate-limit, credential, output-order, and resource regressions. | Assert the maximum in-flight limit, one underlying resolve per unique key, unchanged errors, and a lower median resolve section in two controlled large-update runs. |
 | 8 | **Use blobless clones for full-package cache misses.** **Evidence:** cache-miss Git object transfer is measured; host-specific savings remain a hypothesis. | High potential for large repositories. Preserve fallback for hosts that reject partial clone and prevent lazy fetches from crossing auth boundaries. | Compare transferred bytes, cache size, and cold install/update medians. Require identical package contents and successful full-clone fallback. |
 | 9 | **Reuse hashes verified in the current run.** **Evidence:** duplicate hashing is measured. | Medium CPU and I/O gain. Reuse only immutable content identities; never carry trust across changed files, sources, or runs. | Hash each eligible content identity once per run, preserve every integrity failure, and reduce hash call count and hash-section time in the profiled fixture. |
 | 10 | **Pass materialization Git config through clone-time `-c`.** **Evidence:** five post-clone config subprocesses are measured per affected materialization. | Medium fixed-cost gain. Quoting, config scope, sparse checkout, and promisor behavior must remain identical. | Remove all five post-clone config subprocesses, preserve the resulting Git config, and reduce Git process count and materialization time. |

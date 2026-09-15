@@ -82,6 +82,17 @@ download or compare a baseline.
 `summarize-results` accepts any complete current `smoke`, `full`, or `live`
 Linux x86_64 report. Install and update rows use product-default parallelism.
 
+For the deterministic update-ref concurrency proxy, run:
+
+```bash
+uv run --extra dev pytest -q -m benchmark tests/benchmarks/test_tiered_resolver_benchmarks.py
+```
+
+That focused benchmark compares one-worker and four-worker update-plan ref
+annotation with fixed per-ref latency. It asserts bounded overlap and unchanged
+underlying unique-ref work. Treat its ratio as an algorithmic guard, not as a
+network or end-to-end update measurement.
+
 ## Artifacts and baseline
 
 When selected, smoke and full always run after the baseline lookup:

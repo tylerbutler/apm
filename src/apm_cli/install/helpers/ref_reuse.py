@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -414,18 +415,40 @@ def annotate_update_plan_refs(
     downloader: GitHubPackageDownloader,
     *,
     update_refs: bool,
+    max_workers: int = 4,
 ) -> list[DependencyReference]:
-    """Resolve Git refs needed by the update plan through the downloader owner."""
+    """Resolve update-plan Git refs through a bounded downloader worker pool.
+
+    Resolution stays behind ``GitHubPackageDownloader`` so the tiered resolver
+    remains the single owner of per-run ``(url, ref)`` coalescing. Results are
+    applied in dependency order after every worker succeeds, preserving stable
+    plan ordering and the first input-order exception raised by the sequential
+    implementation.
+    """
     if not update_refs:
         return deps_to_install
-    for dep_ref in deps_to_install:
-        if (
-            getattr(dep_ref, "resolved_reference", None) is not None
-            or dep_ref.is_local
-            or getattr(dep_ref, "source", None) == "registry"
-            or getattr(dep_ref, "artifactory_prefix", None)
-        ):
-            continue
-        resolved = downloader.resolve_git_reference(dep_ref)
+
+    eligible = [
+        dep_ref
+        for dep_ref in deps_to_install
+        if getattr(dep_ref, "resolved_reference", None) is None
+        and not dep_ref.is_local
+        and getattr(dep_ref, "source", None) != "registry"
+        and not getattr(dep_ref, "artifactory_prefix", None)
+    ]
+    if not eligible:
+        return deps_to_install
+
+    worker_count = max(1, min(max_workers, len(eligible)))
+    if worker_count == 1:
+        resolutions = [downloader.resolve_git_reference(dep_ref) for dep_ref in eligible]
+    else:
+        with ThreadPoolExecutor(
+            max_workers=worker_count,
+            thread_name_prefix="apm-update-ref",
+        ) as executor:
+            resolutions = list(executor.map(downloader.resolve_git_reference, eligible))
+
+    for dep_ref, resolved in zip(eligible, resolutions, strict=True):
         dep_ref.resolved_reference = resolved
     return deps_to_install

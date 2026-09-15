@@ -25,9 +25,11 @@ from apm_cli.deps.tiered_ref_resolver import (
     L3LegacyClone,
     PerRunRefCache,
     RefFreshnessPolicy,
+    RefResolution,
     TieredRefResolver,
     build_tiered_ref_resolver,
 )
+from apm_cli.install.helpers.ref_reuse import annotate_update_plan_refs
 from apm_cli.models.dependency.reference import DependencyReference
 from apm_cli.models.dependency.types import GitReferenceType, ResolvedReference
 
@@ -183,3 +185,54 @@ def test_current_remote_exact_lookup_runs_once_per_normalized_url_ref():
     assert resolver.stats["per_run_cache"] == 6
     assert results[5].ref_type is GitReferenceType.TAG
     assert results[6].ref_type is GitReferenceType.TAG
+
+
+@pytest.mark.benchmark
+def test_update_plan_ref_annotation_parallel_speedup():
+    """Bounded update annotation overlaps unique remote-ref round-trips."""
+    workload = [(f"org/lib-{index}", "main") for index in range(8)] * 2
+
+    def run(max_workers):
+        remote = MagicMock()
+        remote.name = "remote_ref"
+
+        def resolve_remote(dep_ref, ref):
+            time.sleep(CLONE_LATENCY_S)
+            return RefResolution(
+                ref_type=GitReferenceType.BRANCH,
+                resolved_commit="c" * 40,
+                ref_name=ref,
+            )
+
+        remote.try_resolve.side_effect = resolve_remote
+        legacy_inner = MagicMock()
+        legacy_inner.resolve.side_effect = AssertionError("legacy clone should not run")
+        legacy = L3LegacyClone(legacy_inner)
+        cache = PerRunRefCache()
+        resolver = TieredRefResolver(
+            tiers=[L0PerRunCache(cache), remote, legacy],
+            cache=cache,
+            legacy=legacy,
+        )
+        downloader = MagicMock()
+        downloader.resolve_git_reference.side_effect = resolver.resolve
+        deps = [DependencyReference(repo_url=repo, reference=ref) for repo, ref in workload]
+
+        start = time.perf_counter()
+        annotate_update_plan_refs(
+            deps,
+            downloader,
+            update_refs=True,
+            max_workers=max_workers,
+        )
+        elapsed = time.perf_counter() - start
+        return elapsed, remote.try_resolve.call_count
+
+    serial_elapsed, serial_calls = run(1)
+    parallel_elapsed, parallel_calls = run(4)
+
+    assert serial_calls == parallel_calls == 8
+    assert parallel_elapsed < serial_elapsed * 0.6, (
+        f"Expected parallel annotation to beat serial by at least 40% "
+        f"(serial={serial_elapsed:.3f}s parallel={parallel_elapsed:.3f}s)"
+    )

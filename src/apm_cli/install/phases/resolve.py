@@ -833,6 +833,7 @@ def _resolve_dependencies(
         deps_to_install,
         downloader,
         update_refs=update_refs,
+        max_workers=ctx.parallel_downloads if ctx.parallel_downloads > 0 else 1,
     )
 
     # ------------------------------------------------------------------
