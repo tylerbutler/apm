@@ -67,6 +67,7 @@ jobs:
         run: >-
           uv run --frozen --no-sync python -m scripts.perf.benchmark_matrix
           run --profile smoke --output results.json
+          --preparation-output preparation.json
 
       - name: Compare with full-main baseline
         if: ${{ hashFiles('baseline/results.json') != '' }}
@@ -95,6 +96,7 @@ jobs:
           name: benchmark-smoke
           path: |
             results.json
+            preparation.json
             comparison.json
             summary.md
           if-no-files-found: error
@@ -107,6 +109,7 @@ jobs:
           name: benchmark-smoke
           path: |
             results.json
+            preparation.json
             summary.md
           if-no-files-found: error
           retention-days: 14
@@ -152,6 +155,7 @@ jobs:
         run: >-
           uv run --frozen --no-sync python -m scripts.perf.benchmark_matrix
           run --profile full --output results.json
+          --preparation-output preparation.json
 
       - name: Compare with full-main baseline
         if: ${{ hashFiles('baseline/results.json') != '' }}
@@ -180,6 +184,7 @@ jobs:
           name: ${{ github.ref == 'refs/heads/main' && 'benchmark-full-main' || 'benchmark-full-dispatch' }}
           path: |
             results.json
+            preparation.json
             comparison.json
             summary.md
           if-no-files-found: error
@@ -192,6 +197,7 @@ jobs:
           name: ${{ github.ref == 'refs/heads/main' && 'benchmark-full-main' || 'benchmark-full-dispatch' }}
           path: |
             results.json
+            preparation.json
             summary.md
           if-no-files-found: error
           retention-days: 90
@@ -229,6 +235,7 @@ jobs:
         run: >-
           uv run --frozen --no-sync python -m scripts.perf.benchmark_matrix
           run --profile live --allow-network --output results.json
+          --preparation-output preparation.json
 
       - name: Render live benchmark summary
         run: |
@@ -242,6 +249,7 @@ jobs:
           name: benchmark-live
           path: |
             results.json
+            preparation.json
             summary.md
           if-no-files-found: error
           retention-days: 30

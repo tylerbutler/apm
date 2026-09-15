@@ -4,14 +4,15 @@ from __future__ import annotations
 
 import contextlib
 import os
-import shutil
 import subprocess
+import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
 from apm_cli.deps.lockfile import LockFile
 from apm_cli.models.dependency import DependencyReference
+from apm_cli.utils.file_ops import robust_copytree, robust_rmtree
 from tests.utils.isolated_apm_environment import IsolatedApmEnvironment
 from tests.utils.local_git_repository import LocalGitRepository, LocalGitRepositoryFactory
 from tests.utils.local_package import LocalPackage, LocalPackageFactory
@@ -114,26 +115,79 @@ class PreparedFixture:
 
 
 @dataclass(frozen=True)
-class _PublishedFixture:
-    """Local package repository used by an install or update scenario."""
+class _TemplateRepository:
+    """Immutable revision metadata for one templated dependency repository."""
 
-    package: LocalPackage
-    repository: LocalGitRepository
+    name: str
     remote_url: str
+    revision_a: str
+    revision_b: str
+    relative_content_path: Path
+    content_marker: str
+
+
+@dataclass(frozen=True)
+class _FixtureTemplate:
+    """Read-only package, compile, and Git inputs shared by one fixture size."""
+
+    size: FixtureSize
+    root: Path
+    package_root: Path
+    compile_project_root: Path
+    revision_a_root: Path
+    revision_b_root: Path
+    repositories: tuple[_TemplateRepository, ...]
 
 
 class FixtureFactory:
-    """Build a fresh sample state entirely outside the timed region."""
+    """Build immutable size templates and materialize isolated samples."""
 
     def __init__(
         self,
         repository_root: Path,
         *,
         base_environment: Mapping[str, str] | None = None,
+        template_root: Path | None = None,
     ) -> None:
         """Create a fixture factory for one source checkout."""
         self._repository_root = repository_root.resolve()
         self._base_environment = dict(base_environment or os.environ)
+        self._temporary_templates: tempfile.TemporaryDirectory[str] | None = None
+        if template_root is None:
+            self._temporary_templates = tempfile.TemporaryDirectory(
+                prefix="apm-benchmark-templates-"
+            )
+            self._template_root = Path(self._temporary_templates.name)
+        else:
+            self._template_root = template_root.resolve()
+            self._template_root.mkdir(parents=True, exist_ok=False)
+        self._templates: dict[str, _FixtureTemplate] = {}
+        self._closed = False
+
+    @property
+    def template_root(self) -> Path:
+        """Return the private template root for lifecycle verification."""
+        return self._template_root
+
+    def __enter__(self) -> FixtureFactory:
+        """Return this factory as a managed template owner."""
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        """Remove all shared templates after the profile run."""
+        del exc_info
+        self.close()
+
+    def close(self) -> None:
+        """Remove shared templates without touching materialized samples."""
+        if self._closed:
+            return
+        self._closed = True
+        if self._temporary_templates is not None:
+            _make_tree_writable(self._template_root)
+            self._temporary_templates.cleanup()
+            return
+        _remove_tree_writable(self._template_root)
 
     def prepare_sample(
         self,
@@ -141,24 +195,31 @@ class FixtureFactory:
         sample_root: Path,
     ) -> PreparedFixture:
         """Construct and reset one independent scenario sample."""
-        isolated = IsolatedApmEnvironment.create(
-            sample_root,
-            base_env=self._base_environment,
-        )
-        if scenario.operation == "startup":
-            return PreparedFixture(
-                scenario_id=scenario.id,
-                cwd=isolated.work_root,
-                environment=sanitize_environment(isolated.subprocess_env()),
+        if self._closed:
+            raise FixturePreparationError("Fixture factory is closed")
+        try:
+            isolated = IsolatedApmEnvironment.create(
+                sample_root,
+                base_env=self._base_environment,
             )
-        if scenario.live:
-            return self._prepare_live(scenario, isolated)
-        size = get_fixture_size(_required_size_id(scenario))
-        if scenario.operation == "compile":
-            return self._prepare_compile(scenario, size, isolated)
-        if scenario.operation in {"install", "update"}:
-            return self._prepare_dependency_operation(scenario, size, isolated)
-        raise FixturePreparationError(f"Unsupported benchmark operation: {scenario.operation}")
+            if scenario.operation == "startup":
+                return PreparedFixture(
+                    scenario_id=scenario.id,
+                    cwd=isolated.work_root,
+                    environment=sanitize_environment(isolated.subprocess_env()),
+                )
+            if scenario.live:
+                return self._prepare_live(scenario, isolated)
+            size = get_fixture_size(_required_size_id(scenario))
+            template = self._template_for(size)
+            if scenario.operation == "compile":
+                return self._prepare_compile(scenario, template, isolated)
+            if scenario.operation in {"install", "update"}:
+                return self._prepare_dependency_operation(scenario, template, isolated)
+            raise FixturePreparationError(f"Unsupported benchmark operation: {scenario.operation}")
+        except Exception:
+            _remove_tree_writable(sample_root)
+            raise
 
     def _prepare_live(
         self,
@@ -191,29 +252,22 @@ class FixtureFactory:
     def _prepare_compile(
         self,
         scenario: BenchmarkScenario,
-        size: FixtureSize,
+        template: _FixtureTemplate,
         isolated: IsolatedApmEnvironment,
     ) -> PreparedFixture:
-        package_factory = LocalPackageFactory(isolated.work_root)
-        project = package_factory.create(
-            f"benchmark-compile-{size.id}",
-            targets=("copilot",),
+        size = template.size
+        project_root = isolated.work_root / f"benchmark-compile-{size.id}"
+        _copy_tree_mutable(
+            template.compile_project_root,
+            project_root,
         )
-        primitive_count = size.package_count * size.primitives_per_package
-        source_paths: list[Path] = []
-        for index in range(primitive_count):
-            name = f"benchmark-instruction-{index:04d}"
-            source_paths.append(
-                package_factory.add_instruction(
-                    project,
-                    name,
-                    _instruction_content(name, size.payload_bytes),
-                )
-            )
         environment = sanitize_environment(isolated.subprocess_env())
-        expected_path = project.root / "AGENTS.md"
+        expected_path = project_root / "AGENTS.md"
         marker = f"benchmark-compile-{size.id}-cold-marker"
-        source_paths[0].write_text(
+        source_path = (
+            project_root / ".apm" / "instructions" / "benchmark-instruction-0000.instructions.md"
+        )
+        source_path.write_text(
             _instruction_content(
                 "benchmark-instruction-0000",
                 size.payload_bytes,
@@ -223,9 +277,9 @@ class FixtureFactory:
             newline="",
         )
         if scenario.temperature == "warm":
-            self._run_setup(scenario.command, cwd=project.root, environment=environment)
+            self._run_setup(scenario.command, cwd=project_root, environment=environment)
             marker = f"benchmark-compile-{size.id}-warm-revision-b"
-            source_paths[0].write_text(
+            source_path.write_text(
                 _instruction_content(
                     "benchmark-instruction-0000",
                     size.payload_bytes,
@@ -236,7 +290,7 @@ class FixtureFactory:
             )
         return PreparedFixture(
             scenario_id=scenario.id,
-            cwd=project.root,
+            cwd=project_root,
             environment=environment,
             required_paths=(expected_path,),
             expected_file_markers=((expected_path, marker),),
@@ -245,58 +299,44 @@ class FixtureFactory:
     def _prepare_dependency_operation(
         self,
         scenario: BenchmarkScenario,
-        size: FixtureSize,
+        template: _FixtureTemplate,
         isolated: IsolatedApmEnvironment,
     ) -> PreparedFixture:
-        package_factory = LocalPackageFactory(isolated.package_root)
-        repository_factory = LocalGitRepositoryFactory(
+        size = template.size
+        _copy_tree_mutable(
+            template.package_root,
+            isolated.package_root,
+            dirs_exist_ok=True,
+        )
+        _copy_tree_mutable(
+            template.revision_a_root,
             isolated.repository_root,
-            env=isolated.subprocess_env(),
+            dirs_exist_ok=True,
         )
-        published: list[_PublishedFixture] = []
-        dependencies: list[dict[str, object]] = []
-        rewrites: list[tuple[LocalGitRepository, str]] = []
-        for package_index in range(size.package_count):
-            name = f"benchmark-package-{package_index:03d}"
-            package = package_factory.create(name, targets=("copilot",))
-            self._add_package_primitives(package_factory, package, size)
-            repository = repository_factory.create(name, source_tree=package.root)
-            repository_factory.commit(repository, message=f"seed {name}")
-            remote_url = f"https://github.com/apm-benchmark-fixtures/{name}"
-            published.append(
-                _PublishedFixture(
-                    package=package,
-                    repository=repository,
-                    remote_url=remote_url,
-                )
-            )
-            dependencies.append(
-                {
-                    "git": remote_url,
-                    "ref": "main",
-                    "alias": name,
-                }
-            )
-            rewrites.append((repository, remote_url))
-
-        environment = sanitize_environment(
-            repository_factory.url_rewrite_subprocess_env_many(tuple(rewrites))
+        dependencies = tuple(
+            {
+                "git": item.remote_url,
+                "ref": "main",
+                "alias": item.name,
+            }
+            for item in template.repositories
         )
+        environment = _dependency_environment(isolated, template.repositories)
         consumer_factory = LocalPackageFactory(isolated.work_root)
         project = consumer_factory.create(
             f"benchmark-{scenario.operation}-{size.id}",
-            dependencies=tuple(dependencies),
+            dependencies=dependencies,
             targets=("copilot",),
         )
         expected_install_paths = tuple(
-            project.root / "apm_modules" / item.package.name for item in published
+            project.root / "apm_modules" / item.name for item in template.repositories
         )
         required_paths = (project.root / "apm.lock.yaml",)
 
         if scenario.operation == "install":
             if scenario.temperature == "warm":
                 seed_root = isolated.root / "project-seed"
-                shutil.copytree(project.root, seed_root)
+                _copy_tree_mutable(project.root, seed_root)
                 self._run_setup(scenario.command, cwd=project.root, environment=environment)
                 _replace_tree(project.root, seed_root)
             return PreparedFixture(
@@ -312,11 +352,19 @@ class FixtureFactory:
             cwd=project.root,
             environment=environment,
         )
-        expected_updates = self._advance_repositories(
-            repository_factory,
-            published,
-            size,
-            project.root / "apm_modules",
+        _replace_tree(
+            isolated.repository_root,
+            template.revision_b_root,
+        )
+        expected_updates = tuple(
+            ExpectedUpdate(
+                repo_url=DependencyReference.parse(item.remote_url).canonical_repo_url,
+                resolved_commit=item.revision_b,
+                install_path=project.root / "apm_modules" / item.name,
+                relative_content_path=item.relative_content_path,
+                content_marker=item.content_marker,
+            )
+            for item in template.repositories
         )
         if scenario.temperature == "cold":
             _remove_tree_writable(isolated.cache_root)
@@ -329,6 +377,143 @@ class FixtureFactory:
             expected_updates=expected_updates,
             required_paths=required_paths,
         )
+
+    def _template_for(self, size: FixtureSize) -> _FixtureTemplate:
+        template = self._templates.get(size.id)
+        if template is not None:
+            return template
+        template = self._build_template(size)
+        self._templates[size.id] = template
+        return template
+
+    def _build_template(self, size: FixtureSize) -> _FixtureTemplate:
+        final_root = self._template_root / size.id
+        staging_root = self._template_root / f".{size.id}.building"
+        _remove_tree_writable(staging_root)
+        _remove_tree_writable(final_root)
+        try:
+            staging_root.mkdir(parents=True)
+            build_environment = IsolatedApmEnvironment.create(
+                staging_root / "build",
+                base_env=self._base_environment,
+            )
+            repositories = self._build_dependency_templates(
+                size,
+                build_environment,
+                staging_root,
+            )
+            compile_project = self._build_compile_template(size, build_environment)
+            compile_template_root = staging_root / "compile-project"
+            _copy_tree_mutable(compile_project.root, compile_template_root)
+            _remove_tree_writable(build_environment.root)
+            staging_root.rename(final_root)
+            template = _FixtureTemplate(
+                size=size,
+                root=final_root,
+                package_root=final_root / "package-payloads",
+                compile_project_root=final_root / "compile-project",
+                revision_a_root=final_root / "repositories-a",
+                revision_b_root=final_root / "repositories-b",
+                repositories=repositories,
+            )
+            _make_tree_readonly(final_root)
+            return template
+        except Exception:
+            _remove_tree_writable(staging_root)
+            _remove_tree_writable(final_root)
+            raise
+
+    def _build_dependency_templates(
+        self,
+        size: FixtureSize,
+        isolated: IsolatedApmEnvironment,
+        staging_root: Path,
+    ) -> tuple[_TemplateRepository, ...]:
+        package_factory = LocalPackageFactory(isolated.package_root)
+        repository_factory = LocalGitRepositoryFactory(
+            isolated.repository_root,
+            env=isolated.subprocess_env(),
+        )
+        published: list[tuple[LocalPackage, LocalGitRepository, str, str]] = []
+        for package_index in range(size.package_count):
+            name = f"benchmark-package-{package_index:03d}"
+            package = package_factory.create(name, targets=("copilot",))
+            self._add_package_primitives(package_factory, package, size)
+            repository = repository_factory.create(name, source_tree=package.root)
+            revision_a = repository_factory.commit(
+                repository,
+                message=f"seed {name}",
+            ).sha
+            remote_url = f"https://github.com/apm-benchmark-fixtures/{name}"
+            published.append((package, repository, remote_url, revision_a))
+
+        package_template_root = staging_root / "package-payloads"
+        revision_a_root = staging_root / "repositories-a"
+        _copy_tree_mutable(isolated.package_root, package_template_root)
+        self._copy_origins(published, revision_a_root)
+
+        repositories: list[_TemplateRepository] = []
+        for package, repository, remote_url, revision_a in published:
+            primitive_name = f"{package.name}-primitive-0000"
+            relative_path = Path("skills") / primitive_name / "SKILL.md"
+            marker = f"revision-b-{package.name}"
+            (repository.worktree / relative_path).write_text(
+                _skill_content(
+                    primitive_name,
+                    size.payload_bytes,
+                    marker=marker,
+                ),
+                encoding="ascii",
+                newline="",
+            )
+            revision_b = repository_factory.commit(
+                repository,
+                message=f"update {package.name}",
+            ).sha
+            repositories.append(
+                _TemplateRepository(
+                    name=package.name,
+                    remote_url=remote_url,
+                    revision_a=revision_a,
+                    revision_b=revision_b,
+                    relative_content_path=relative_path,
+                    content_marker=marker,
+                )
+            )
+        self._copy_origins(published, staging_root / "repositories-b")
+        return tuple(repositories)
+
+    @staticmethod
+    def _copy_origins(
+        published: list[tuple[LocalPackage, LocalGitRepository, str, str]],
+        destination: Path,
+    ) -> None:
+        destination.mkdir(parents=True)
+        for package, repository, _remote_url, _revision_a in published:
+            _copy_tree_mutable(
+                repository.origin,
+                destination / f"{package.name}.git",
+            )
+
+    @staticmethod
+    def _build_compile_template(
+        size: FixtureSize,
+        isolated: IsolatedApmEnvironment,
+    ) -> LocalPackage:
+        package_factory = LocalPackageFactory(isolated.work_root)
+        project = package_factory.create(
+            f"benchmark-compile-{size.id}",
+            targets=("copilot",),
+        )
+        primitive_count = size.package_count * size.primitives_per_package
+        for index in range(primitive_count):
+            name = f"benchmark-instruction-{index:04d}"
+            package_factory.add_instruction(
+                project,
+                name,
+                _instruction_content(name, size.payload_bytes),
+            )
+        return project
 
     def _add_package_primitives(
         self,
@@ -350,43 +535,6 @@ class FixtureFactory:
                     name,
                     _instruction_content(name, size.payload_bytes),
                 )
-
-    def _advance_repositories(
-        self,
-        repository_factory: LocalGitRepositoryFactory,
-        published: list[_PublishedFixture],
-        size: FixtureSize,
-        module_root: Path,
-    ) -> tuple[ExpectedUpdate, ...]:
-        updates: list[ExpectedUpdate] = []
-        for item in published:
-            primitive_name = f"{item.package.name}-primitive-0000"
-            relative_path = Path("skills") / primitive_name / "SKILL.md"
-            update_path = item.repository.worktree / relative_path
-            marker = f"revision-b-{item.package.name}"
-            update_path.write_text(
-                _skill_content(
-                    primitive_name,
-                    size.payload_bytes,
-                    marker=marker,
-                ),
-                encoding="ascii",
-                newline="",
-            )
-            commit = repository_factory.commit(
-                item.repository,
-                message=f"update {item.package.name}",
-            )
-            updates.append(
-                ExpectedUpdate(
-                    repo_url=DependencyReference.parse(item.remote_url).canonical_repo_url,
-                    resolved_commit=commit.sha,
-                    install_path=module_root / item.package.name,
-                    relative_content_path=relative_path,
-                    content_marker=marker,
-                )
-            )
-        return tuple(updates)
 
     def _run_setup(
         self,
@@ -469,18 +617,70 @@ def _instruction_content(
 def _replace_tree(destination: Path, source: Path) -> None:
     """Replace a project tree with a pristine untimed seed copy."""
     _remove_tree_writable(destination)
-    shutil.copytree(source, destination)
+    _copy_tree_mutable(source, destination)
+
+
+def _copy_tree_mutable(
+    source: Path,
+    destination: Path,
+    *,
+    dirs_exist_ok: bool = False,
+) -> None:
+    """Reflink-copy one template tree and restore sample write permissions."""
+    robust_copytree(
+        source,
+        destination,
+        dirs_exist_ok=dirs_exist_ok,
+    )
+    _make_tree_writable(destination)
+
+
+def _dependency_environment(
+    isolated: IsolatedApmEnvironment,
+    repositories: tuple[_TemplateRepository, ...],
+) -> dict[str, str]:
+    """Route production dependency URLs to sample-local immutable revisions."""
+    environment = isolated.subprocess_env()
+    slots: list[tuple[str, str]] = []
+    for item in repositories:
+        origin = isolated.repository_root / f"{item.name}.git"
+        rewrite_base = f"{origin.resolve().as_uri()}/"
+        key = f"url.{rewrite_base}.insteadOf"
+        bare = item.remote_url.removesuffix(".git")
+        slots.extend(((key, bare), (key, f"{bare}.git")))
+    environment["GIT_CONFIG_COUNT"] = str(len(slots))
+    for index, (key, value) in enumerate(slots):
+        environment[f"GIT_CONFIG_KEY_{index}"] = key
+        environment[f"GIT_CONFIG_VALUE_{index}"] = value
+    return sanitize_environment(environment)
+
+
+def _make_tree_readonly(path: Path) -> None:
+    """Protect shared templates from accidental sample mutation."""
+    if not path.exists():
+        return
+    for candidate in sorted(path.rglob("*"), reverse=True):
+        mode = candidate.stat().st_mode
+        candidate.chmod(mode & ~0o222)
+    path.chmod(path.stat().st_mode & ~0o222)
+
+
+def _make_tree_writable(path: Path) -> None:
+    """Restore owner write permission throughout a copied or cleanup tree."""
+    if not path.exists():
+        return
+    path.chmod(path.stat().st_mode | 0o700)
+    for candidate in path.rglob("*"):
+        try:
+            candidate.chmod(candidate.stat().st_mode | (0o700 if candidate.is_dir() else 0o600))
+        except OSError:
+            continue
 
 
 def _remove_tree_writable(path: Path) -> None:
     """Remove a generated tree after restoring owner write permissions."""
     if not path.exists():
         return
-    for candidate in path.rglob("*"):
-        try:
-            candidate.chmod(0o700 if candidate.is_dir() else 0o600)
-        except OSError:
-            continue
     with contextlib.suppress(OSError):
-        path.chmod(0o700)
-    shutil.rmtree(path)
+        _make_tree_writable(path)
+    robust_rmtree(path)

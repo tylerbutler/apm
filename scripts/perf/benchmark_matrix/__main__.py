@@ -7,6 +7,7 @@ import platform
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -16,6 +17,12 @@ from .github_baseline import (
     BaselineError,
     BaselineNotFoundError,
     download_latest_baseline,
+)
+from .preparation import (
+    PreparationFormatError,
+    PreparationSample,
+    make_preparation_report,
+    write_preparation_report,
 )
 from .results import (
     BenchmarkReport,
@@ -51,8 +58,12 @@ def main(argv: list[str] | None = None) -> int:
                 args.profile,
                 repository_root=args.repo_root,
                 output=args.output,
+                preparation_output=args.preparation_output,
             )
-            sys.stdout.write(f"Wrote {len(report.scenarios)} benchmark rows to {args.output}\n")
+            sys.stdout.write(
+                f"Wrote {len(report.scenarios)} benchmark rows to {args.output} "
+                f"and preparation timings to {args.preparation_output}\n"
+            )
             return 0
         if args.command == "compare":
             comparison = compare_reports(
@@ -94,6 +105,7 @@ def main(argv: list[str] | None = None) -> int:
         BenchmarkRunError,
         FixturePreparationError,
         OSError,
+        PreparationFormatError,
         ResultFormatError,
         ValueError,
         subprocess.SubprocessError,
@@ -130,6 +142,12 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("results.json"),
         help="Result JSON path.",
+    )
+    run_parser.add_argument(
+        "--preparation-output",
+        type=Path,
+        default=Path("preparation.json"),
+        help="Separate harness preparation timing JSON path.",
     )
     run_parser.add_argument(
         "--allow-network",
@@ -177,6 +195,7 @@ def _run_profile(
     *,
     repository_root: Path,
     output: Path,
+    preparation_output: Path,
 ) -> BenchmarkReport:
     _require_supported_platform()
     repository_root = repository_root.resolve()
@@ -184,38 +203,66 @@ def _run_profile(
         raise BenchmarkConfigurationError(
             f"Repository root does not contain pyproject.toml: {repository_root}"
         )
+    if output.resolve() == preparation_output.resolve():
+        raise BenchmarkConfigurationError("Result and preparation outputs must use different paths")
     profile_definition = get_profile(profile_id)
     runner = BenchmarkRunner(repository_root)
-    fixture_factory = FixtureFactory(repository_root)
     rows = []
+    preparation_samples: list[PreparationSample] = []
     with tempfile.TemporaryDirectory(prefix=f"apm-benchmark-{profile_id}-") as temp_dir:
         matrix_root = Path(temp_dir)
-        for scenario_id in profile_definition.scenario_ids:
-            scenario = get_scenario(scenario_id)
-            samples: list[int] = []
-            for repetition in range(profile_definition.repetitions):
-                sample_root = matrix_root / scenario.id / f"sample-{repetition:02d}"
-                sample_root.parent.mkdir(parents=True, exist_ok=True)
-                fixture = fixture_factory.prepare_sample(scenario, sample_root)
-                result = runner.run_sample(scenario, fixture)
-                samples.append(result.elapsed_ns)
-            rows.append(
-                make_scenario_result(
-                    profile_definition,
-                    scenario.id,
-                    tuple(samples),
+        with FixtureFactory(
+            repository_root,
+            template_root=matrix_root / ".fixture-templates",
+        ) as fixture_factory:
+            for scenario_id in profile_definition.scenario_ids:
+                scenario = get_scenario(scenario_id)
+                samples: list[int] = []
+                for repetition in range(profile_definition.repetitions):
+                    sample_root = matrix_root / scenario.id / f"sample-{repetition:02d}"
+                    sample_root.parent.mkdir(parents=True, exist_ok=True)
+                    preparation_started_ns = time.perf_counter_ns()
+                    fixture = fixture_factory.prepare_sample(scenario, sample_root)
+                    preparation_finished_ns = time.perf_counter_ns()
+                    preparation_samples.append(
+                        PreparationSample(
+                            scenario_id=scenario.id,
+                            repetition=repetition,
+                            elapsed_ns=preparation_finished_ns - preparation_started_ns,
+                        )
+                    )
+                    result = runner.run_sample(scenario, fixture)
+                    samples.append(result.elapsed_ns)
+                rows.append(
+                    make_scenario_result(
+                        profile_definition,
+                        scenario.id,
+                        tuple(samples),
+                    )
                 )
-            )
+    generated_at = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    repository_revision = _repository_revision(repository_root)
+    platform_identity = _platform_identity()
     report = BenchmarkReport(
         schema_version=RESULT_SCHEMA_VERSION,
         profile=profile_definition.id,
         baseline_authority=profile_definition.baseline_authority,
-        generated_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-        repository_revision=_repository_revision(repository_root),
-        platform=_platform_identity(),
+        generated_at=generated_at,
+        repository_revision=repository_revision,
+        platform=platform_identity,
         scenarios=tuple(rows),
     )
     write_report(output, report)
+    write_preparation_report(
+        preparation_output,
+        make_preparation_report(
+            profile_id=profile_definition.id,
+            generated_at=generated_at,
+            repository_revision=repository_revision,
+            platform=platform_identity,
+            samples=tuple(preparation_samples),
+        ),
+    )
     return report
 
 

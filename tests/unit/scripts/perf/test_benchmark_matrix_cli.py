@@ -3,24 +3,28 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from scripts.perf.benchmark_matrix import __main__ as cli
+from scripts.perf.benchmark_matrix.catalog import get_profile
 from scripts.perf.benchmark_matrix.github_baseline import (
     BaselineError,
     BaselineNotFoundError,
 )
+from scripts.perf.benchmark_matrix.preparation import load_preparation_report
 from scripts.perf.benchmark_matrix.results import (
     BenchmarkReport,
     ComparisonReport,
     ComparisonRow,
     ComparisonStatus,
     compare_reports,
+    load_report,
     write_comparison,
     write_report,
 )
-from tests.utils.benchmark_matrix_fixture import build_benchmark_report
+from tests.utils.benchmark_matrix_fixture import DEFAULT_PLATFORM, build_benchmark_report
 
 pytestmark = pytest.mark.component
 
@@ -45,19 +49,121 @@ def test_run_command_accepts_workflow_argument_shape(
         *,
         repository_root: Path,
         output: Path,
+        preparation_output: Path,
     ) -> BenchmarkReport:
         captured.update(
             profile_id=profile_id,
             repository_root=repository_root,
             output=output,
+            preparation_output=preparation_output,
         )
         return _report()
 
     monkeypatch.setattr(cli, "_run_profile", fake_run_profile)
     output = tmp_path / "results.json"
-    assert cli.main(["run", "--profile", "smoke", "--output", str(output)]) == 0
+    preparation_output = tmp_path / "preparation.json"
+    assert (
+        cli.main(
+            [
+                "run",
+                "--profile",
+                "smoke",
+                "--output",
+                str(output),
+                "--preparation-output",
+                str(preparation_output),
+            ]
+        )
+        == 0
+    )
     assert captured["profile_id"] == "smoke"
     assert captured["output"] == output
+    assert captured["preparation_output"] == preparation_output
+
+
+def test_run_profile_keeps_preparation_out_of_product_samples(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fixture preparation and product subprocess timings use separate reports."""
+    profile = get_profile("smoke")
+    clock_values = iter(
+        value
+        for index in range(len(profile.scenario_ids) * profile.repetitions)
+        for value in (index * 1_000 + 10, index * 1_000 + 110)
+    )
+
+    class FakeFactory:
+        def __init__(self, repository_root: Path, *, template_root: Path) -> None:
+            del repository_root, template_root
+
+        def __enter__(self) -> FakeFactory:
+            return self
+
+        def __exit__(self, *exc_info: object) -> None:
+            del exc_info
+
+        def prepare_sample(self, scenario: object, sample_root: Path) -> object:
+            del scenario, sample_root
+            return object()
+
+    class FakeRunner:
+        def __init__(self, repository_root: Path) -> None:
+            del repository_root
+
+        def run_sample(self, scenario: object, fixture: object) -> object:
+            del scenario, fixture
+            return SimpleNamespace(elapsed_ns=777)
+
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='fixture'\n", encoding="ascii")
+    monkeypatch.setattr(cli, "_require_supported_platform", lambda: None)
+    monkeypatch.setattr(cli, "_repository_revision", lambda root: "a" * 40)
+    monkeypatch.setattr(cli, "_platform_identity", lambda: DEFAULT_PLATFORM)
+    monkeypatch.setattr(cli.time, "perf_counter_ns", lambda: next(clock_values))
+    monkeypatch.setattr(cli, "FixtureFactory", FakeFactory)
+    monkeypatch.setattr(cli, "BenchmarkRunner", FakeRunner)
+
+    results_path = tmp_path / "results.json"
+    preparation_path = tmp_path / "preparation.json"
+    cli._run_profile(
+        "smoke",
+        repository_root=tmp_path,
+        output=results_path,
+        preparation_output=preparation_path,
+    )
+
+    result_report = load_report(results_path)
+    preparation_report = load_preparation_report(preparation_path)
+    assert {sample for row in result_report.scenarios for sample in row.samples_ns} == {777}
+    assert {sample.elapsed_ns for sample in preparation_report.samples} == {100}
+
+
+def test_run_rejects_same_result_and_preparation_path(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Separate report paths are required before any profile work begins."""
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='fixture'\n", encoding="ascii")
+    output = tmp_path / "benchmark.json"
+
+    assert (
+        cli.main(
+            [
+                "run",
+                "--profile",
+                "smoke",
+                "--repo-root",
+                str(tmp_path),
+                "--output",
+                str(output),
+                "--preparation-output",
+                str(output),
+            ]
+        )
+        == 2
+    )
+    assert "must use different paths" in capsys.readouterr().err
+    assert not output.exists()
 
 
 def test_compare_uses_candidate_then_baseline_and_remains_advisory(
@@ -253,8 +359,9 @@ def test_unexpected_programming_error_is_not_hidden(
         *,
         repository_root: Path,
         output: Path,
+        preparation_output: Path,
     ) -> BenchmarkReport:
-        del profile_id, repository_root, output
+        del profile_id, repository_root, output, preparation_output
         raise TypeError("programming error")
 
     monkeypatch.setattr(cli, "_run_profile", fail_unexpectedly)

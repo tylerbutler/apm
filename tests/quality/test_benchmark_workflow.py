@@ -51,10 +51,10 @@ ARTIFACT_NAMES = {
 }
 RETENTION_DAYS = {"smoke": 14, "full": 90, "live": 30}
 COMPARED_OUTPUTS = {
-    "smoke": "results.json\ncomparison.json\nsummary.md\n",
-    "full": "results.json\ncomparison.json\nsummary.md\n",
+    "smoke": "results.json\npreparation.json\ncomparison.json\nsummary.md\n",
+    "full": "results.json\npreparation.json\ncomparison.json\nsummary.md\n",
 }
-DIRECT_OUTPUTS = "results.json\nsummary.md\n"
+DIRECT_OUTPUTS = "results.json\npreparation.json\nsummary.md\n"
 BASELINE_PRESENT_IF = "${{ hashFiles('baseline/results.json') != '' }}"
 BASELINE_MISSING_IF = "${{ hashFiles('baseline/results.json') == '' }}"
 
@@ -164,7 +164,15 @@ def _assert_harness_delegation(workflow: WorkflowNode) -> None:
         comparison_summary_step = workflow_step(job, "Render comparison summary")
         direct_summary_step = workflow_step(job, "Render no-baseline summary")
 
-        run_args = ["run", "--profile", profile, "--output", "results.json"]
+        run_args = [
+            "run",
+            "--profile",
+            profile,
+            "--output",
+            "results.json",
+            "--preparation-output",
+            "preparation.json",
+        ]
         assert shell_commands(run_step) == [[*HARNESS_PREFIX, *run_args]]
         assert compare_step.get("if") == BASELINE_PRESENT_IF
         assert shell_commands(compare_step) == [
@@ -210,6 +218,8 @@ def _assert_harness_delegation(workflow: WorkflowNode) -> None:
             "--allow-network",
             "--output",
             "results.json",
+            "--preparation-output",
+            "preparation.json",
         ]
     ]
     assert shell_commands(workflow_step(live, "Render live benchmark summary")) == [
@@ -455,6 +465,20 @@ def test_bootstrap_upload_includes_comparison_fails(
         "Upload full benchmark artifacts (bootstrap)",
     )
     upload["with"]["path"] = COMPARED_OUTPUTS["full"]
+
+    with pytest.raises(AssertionError):
+        _assert_baseline_and_artifact_contract(mutated)
+
+
+def test_upload_drops_preparation_report_fails(
+    benchmark_workflow: WorkflowNode,
+) -> None:
+    mutated = deepcopy(benchmark_workflow)
+    upload = workflow_step(
+        workflow_job(mutated, "smoke"),
+        "Upload smoke benchmark artifacts (bootstrap)",
+    )
+    upload["with"]["path"] = "results.json\nsummary.md\n"
 
     with pytest.raises(AssertionError):
         _assert_baseline_and_artifact_contract(mutated)

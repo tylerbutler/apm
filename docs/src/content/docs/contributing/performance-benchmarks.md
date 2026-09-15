@@ -30,6 +30,23 @@ Hermetic operation rows use two modes:
 
 Compare cold with cold and warm with warm. Do not combine the modes.
 
+## Harness preparation
+
+For each fixture size in a profile run, the harness builds one protected,
+immutable package payload and Git revision A/B template. Each sample receives
+reflink-capable copies in sample-local mutable project, repository/origin,
+config, cache, temp, and output roots. Shared references never move.
+
+Update setup installs revision A, then replaces the sample-local origin from
+the immutable revision B template before `BenchmarkRunner.run_sample`.
+`FixtureFactory.prepare_sample` is timed separately from that product command.
+The harness writes product timings to `results.json` and preparation throughput
+to `preparation.json`, including each sample's `elapsed_ns` and the profile's
+`total_elapsed_ns`.
+
+Preparation throughput measures benchmark harness cost. It is not install,
+update, compile, or startup latency.
+
 ## Run the harness locally
 
 Run the harness from the repository root. The entrypoint is:
@@ -44,6 +61,10 @@ Run and summarize a smoke profile:
 uv run --frozen --no-sync python -m scripts.perf.benchmark_matrix run --profile smoke --output results.json
 uv run --frozen --no-sync python -m scripts.perf.benchmark_matrix summarize-results results.json > summary.md
 ```
+
+`run` writes harness preparation timings to `preparation.json` by default. Use
+`--preparation-output PATH` to choose another path. The preparation output must
+not be the same path as `--output`.
 
 Download and compare with a trusted baseline:
 
@@ -66,17 +87,24 @@ Linux x86_64 report. Install and update rows use product-default parallelism.
 When selected, smoke and full always run after the baseline lookup:
 
 - With `baseline/results.json`, CI runs `compare` and `summary`, then uploads
-  `results.json`, `comparison.json`, and `summary.md`.
+  `results.json`, `preparation.json`, `comparison.json`, and `summary.md`.
 - Without `baseline/results.json`, CI runs `summarize-results results.json`,
-  then uploads `results.json` and `summary.md`.
+  then uploads `results.json`, `preparation.json`, and `summary.md`.
 
-The live job is separate. It uploads `results.json` and `summary.md` only.
+The live job is separate. It uploads `results.json`, `preparation.json`, and
+`summary.md`.
 
 | File | Contents |
 | --- | --- |
-| `results.json` | Profile, environment, scenario definitions, and timing samples |
+| `results.json` | Profile, environment, scenario definitions, and product timing samples |
+| `preparation.json` | Per-sample and total harness preparation timings |
 | `comparison.json` | Baseline matches, timing deltas, and comparison statuses |
 | `summary.md` | Human-readable result or comparison summary |
+
+Baseline download and comparison use `results.json` only.
+`preparation.json` does not affect comparison statuses or baseline
+compatibility. The result schema version and comparison semantics are
+unchanged.
 
 The baseline downloader accepts only
 `benchmark-full-main/results.json` from a successful `main` scheduled or manual
