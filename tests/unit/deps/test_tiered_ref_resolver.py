@@ -596,10 +596,10 @@ def test_factory_builds_full_stack_when_enabled(monkeypatch):
     downloader._refs = MagicMock()
     resolver = build_tiered_ref_resolver(downloader=downloader)
     assert isinstance(resolver, TieredRefResolver)
-    # 4 tiers: L0, L1, L2, L3
+    # 4 tiers: L0, zero-network L2, L1, L3
     assert len(resolver._tiers) == 4
     tier_names = [t.name for t in resolver._tiers]
-    assert tier_names == ["per_run_cache", "commits_api", "bare_rev_parse", "legacy_clone"]
+    assert tier_names == ["per_run_cache", "bare_rev_parse", "commits_api", "legacy_clone"]
 
 
 # ---------------------------------------------------------------------------
@@ -612,8 +612,8 @@ def test_factory_excludes_l2_when_update_refs_true(monkeypatch):
 
     L2 reads the local bare-repo cache without fetching from remote, so
     during update/outdated runs it would silently return a stale SHA.
-    Excluding it forces resolution through L1 (CommitsAPI) and L3 (legacy
-    clone), both of which contact the network.
+    Excluding it forces resolution through the exact remote tier and L3
+    (legacy clone), both of which contact the network.
     """
     monkeypatch.setenv("APM_TIERED_RESOLVER", "1")
     downloader = MagicMock()
@@ -626,8 +626,9 @@ def test_factory_excludes_l2_when_update_refs_true(monkeypatch):
     tier_names = [t.name for t in resolver._tiers]
     # bare_rev_parse must NOT be present
     assert "bare_rev_parse" not in tier_names
-    # L0, L1, exact remote ref, and L3 remain.
-    assert tier_names == ["per_run_cache", "commits_api", "remote_ref", "legacy_clone"]
+    # L0, exact remote ref, and L3 remain. The commits API is not authoritative
+    # for branch-versus-tag identity and must not add a redundant request.
+    assert tier_names == ["per_run_cache", "remote_ref", "legacy_clone"]
 
 
 def test_factory_includes_l2_when_update_refs_false(monkeypatch):
@@ -646,7 +647,7 @@ def test_factory_includes_l2_when_update_refs_false(monkeypatch):
     assert isinstance(resolver, TieredRefResolver)
     tier_names = [t.name for t in resolver._tiers]
     assert "bare_rev_parse" in tier_names
-    assert tier_names == ["per_run_cache", "commits_api", "bare_rev_parse", "legacy_clone"]
+    assert tier_names == ["per_run_cache", "bare_rev_parse", "commits_api", "legacy_clone"]
 
 
 def test_stale_bare_bypassed_on_update(monkeypatch, tmp_path):
@@ -654,12 +655,9 @@ def test_stale_bare_bypassed_on_update(monkeypatch, tmp_path):
 
     Scenario:
     - L2BareRevParse would return SHA_A (stale cached value).
-    - L1 CommitsAPI returns SHA_B (fresh upstream value).
-    - When update_refs=True, L2 is excluded so the resolver returns SHA_B.
-    - When update_refs=False, L2 is in the stack but L1 fires first anyway,
-      so SHA_B is returned and the stale path is never reached in normal flow.
-      The important invariant is that in update mode, L2's stale answer can
-      never surface even if L1 were somehow bypassed.
+    - The exact remote tier returns SHA_B (fresh upstream value).
+    - When update_refs=True, the bare cache and commits API are excluded.
+    - The stale bare answer can never surface in update mode.
     """
     monkeypatch.setenv("APM_TIERED_RESOLVER", "1")
 
@@ -689,7 +687,7 @@ def test_stale_bare_bypassed_on_update(monkeypatch, tmp_path):
 
     assert result.resolved_commit == SHA_B
     stale_l2.assert_not_called()
-    fake_refs.resolve_commit_sha_for_ref.assert_called_once()
+    fake_refs.resolve_commit_sha_for_ref.assert_not_called()
     fake_refs.resolve_remote_ref.assert_called_once()
     fake_refs.resolve.assert_not_called()
     assert resolver.stats["remote_ref"] == 1
@@ -697,7 +695,7 @@ def test_stale_bare_bypassed_on_update(monkeypatch, tmp_path):
     assert "bare_rev_parse" not in resolver.stats
 
 
-def test_normal_policy_uses_l2_when_api_unavailable_without_clone(monkeypatch, tmp_path):
+def test_normal_policy_uses_l2_without_network_or_clone(monkeypatch, tmp_path):
     """A normal warm install keeps the zero-network L2 performance boundary."""
     monkeypatch.setenv("APM_TIERED_RESOLVER", "1")
     bare = tmp_path / cache_shard_key(_dep().to_github_url())
@@ -719,7 +717,7 @@ def test_normal_policy_uses_l2_when_api_unavailable_without_clone(monkeypatch, t
 
     assert result.resolved_commit == SHA_A
     cached_l2.assert_called_once_with(bare, "main")
-    fake_refs.resolve_commit_sha_for_ref.assert_called_once()
+    fake_refs.resolve_commit_sha_for_ref.assert_not_called()
     fake_refs.resolve.assert_not_called()
     assert resolver.stats["bare_rev_parse"] == 1
     assert resolver.stats["legacy_clone"] == 0
@@ -785,14 +783,10 @@ def test_current_policy_remote_tag_type_survives_cache_hit(monkeypatch):
     assert resolver.stats["per_run_cache"] == 1
 
 
-def test_current_policy_runs_exact_remote_after_commits_api(monkeypatch):
+def test_current_policy_runs_exact_remote_without_commits_api(monkeypatch):
     monkeypatch.setenv("APM_TIERED_RESOLVER", "1")
     calls = []
     fake_refs = MagicMock()
-
-    def commits_api(dep_ref, ref):
-        calls.append("commits_api")
-        return SHA_A
 
     def remote_ref(dep_ref, ref):
         calls.append("remote_ref")
@@ -803,7 +797,9 @@ def test_current_policy_runs_exact_remote_after_commits_api(monkeypatch):
             ref_name=ref,
         )
 
-    fake_refs.resolve_commit_sha_for_ref.side_effect = commits_api
+    fake_refs.resolve_commit_sha_for_ref.side_effect = AssertionError(
+        "current-remote resolution must not call the commits API"
+    )
     fake_refs.resolve_remote_ref.side_effect = remote_ref
     downloader = MagicMock()
     downloader._refs = fake_refs
@@ -815,8 +811,9 @@ def test_current_policy_runs_exact_remote_after_commits_api(monkeypatch):
 
     result = resolver.resolve(_dep())
 
-    assert calls == ["commits_api", "remote_ref"]
+    assert calls == ["remote_ref"]
     assert result.resolved_commit == SHA_B
+    fake_refs.resolve_commit_sha_for_ref.assert_not_called()
     fake_refs.resolve.assert_not_called()
 
 
@@ -843,7 +840,7 @@ def test_current_policy_clone_fallback_runs_once_after_remote_miss(monkeypatch):
 
     assert result.ref_type is GitReferenceType.TAG
     assert result.resolved_commit == SHA_C
-    fake_refs.resolve_commit_sha_for_ref.assert_called_once()
+    fake_refs.resolve_commit_sha_for_ref.assert_not_called()
     fake_refs.resolve_remote_ref.assert_called_once()
     fake_refs.resolve.assert_called_once()
     assert resolver.stats["legacy_clone"] == 1

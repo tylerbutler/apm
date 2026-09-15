@@ -180,7 +180,7 @@ def test_current_remote_exact_lookup_collapses_unique_refs_without_clone(monkeyp
 
     results = [resolver.resolve(dep) for dep in deps]
 
-    assert refs.resolve_commit_sha_for_ref.call_count == 3
+    refs.resolve_commit_sha_for_ref.assert_not_called()
     assert refs.resolve_remote_ref.call_count == 3
     refs.resolve.assert_not_called()
     assert resolver.stats["remote_ref"] == 3

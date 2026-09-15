@@ -20,7 +20,7 @@ compared with a controlled CI baseline.
 Reduce large-update latency first. Preserve correctness, command contracts,
 benchmark guards, and scaling guards.
 
-Execute the phases in this order:
+The implemented first wave executed in this order:
 
 1. Cache the parsed lockfile and ownership indexes.
 2. Add a cheaper centralized remote-ref fallback.
@@ -30,6 +30,8 @@ Execute the phases in this order:
 
 Do not combine phases in one change. Separate changes make timing and
 correctness regressions easier to isolate.
+
+Phase 6 is implemented. Evaluate each remaining second-wave item in order.
 
 ## Measured evidence
 
@@ -357,10 +359,58 @@ Phase 4 depends on phase 1. Phases 2 and 3 can proceed independently, but run
 them in the stated order to keep benchmark attribution clear. Phase 5 depends
 only on the benchmark harness and must not delay user-facing work.
 
+## Second-wave backlog
+
+Implement these opportunities in order. Keep each change independently
+measurable and preserve the freshness, authentication, integrity, and rollback
+boundaries established by phases 1-5.
+
+### Phase 6: Order resolver tiers by freshness policy
+
+**Status:** Implemented. Controlled benchmark comparison remains pending.
+
+**Evidence status:** Measured tier call traces show work that the selected
+freshness policy cannot use as a terminal answer. The latency gain from
+reordering remains a hypothesis until the controlled profile.
+
+**Order:**
+
+- `REPRODUCIBLE` = L0 -> local bare -> commits API -> legacy clone.
+- `CURRENT_REMOTE` = L0 -> exact remote -> legacy clone. Omit the commits API
+  because exact remote resolution must establish current branch or tag state.
+
+**Impact and risk:** This should remove avoidable network work from warm
+reproducible installs and current-remote updates. The main risks are accepting
+a stale local ref for `CURRENT_REMOTE`, changing annotated-tag handling, or
+altering auth and fallback behavior.
+
+**Acceptance measurements:**
+
+- A warm `REPRODUCIBLE` hit performs zero network requests and zero clones.
+- A successful `CURRENT_REMOTE` lookup performs one exact-remote operation per
+  unique `(url, ref)`, zero commits API calls, and zero legacy clones.
+- Misses preserve the legacy clone result, error, redaction, and host behavior.
+- In two controlled large-update runs, median resolver time improves beyond
+  benchmark noise and no unrelated benchmark row regresses.
+
+### Ordered follow-on work
+
+| Phase | Opportunity and status | Impact and risk | Acceptance measurements |
+| ---: | --- | --- | --- |
+| 7 | **Bound concurrent update ref resolution.** **Evidence:** serial independent ref work is measured; wall-time gain remains a hypothesis until a network profile. | High potential on multi-package updates. Bound workers to avoid rate-limit, credential, output-order, and resource regressions. | Assert the maximum in-flight limit, one underlying resolve per unique key, unchanged errors, and a lower median resolve section in two controlled large-update runs. |
+| 8 | **Use blobless clones for full-package cache misses.** **Evidence:** cache-miss Git object transfer is measured; host-specific savings remain a hypothesis. | High potential for large repositories. Preserve fallback for hosts that reject partial clone and prevent lazy fetches from crossing auth boundaries. | Compare transferred bytes, cache size, and cold install/update medians. Require identical package contents and successful full-clone fallback. |
+| 9 | **Reuse hashes verified in the current run.** **Evidence:** duplicate hashing is measured. | Medium CPU and I/O gain. Reuse only immutable content identities; never carry trust across changed files, sources, or runs. | Hash each eligible content identity once per run, preserve every integrity failure, and reduce hash call count and hash-section time in the profiled fixture. |
+| 10 | **Pass materialization Git config through clone-time `-c`.** **Evidence:** five post-clone config subprocesses are measured per affected materialization. | Medium fixed-cost gain. Quoting, config scope, sparse checkout, and promisor behavior must remain identical. | Remove all five post-clone config subprocesses, preserve the resulting Git config, and reduce Git process count and materialization time. |
+| 11 | **Reuse thread-local HTTP connections and sessions.** **Evidence:** repeated session and connection setup is measured; end-to-end gain remains a hypothesis. | Medium latency gain for API-heavy runs. Sessions must not cross threads, authorities, explicit credential scopes, or netrc policy boundaries. | Demonstrate same-thread connection reuse, zero cross-thread session sharing, unchanged request count and auth tests, and lower HTTP setup time in two controlled runs. |
+| 12 | **Remove eager package-version metadata loading.** **Evidence:** unused metadata reads are measured on paths that do not consume the values. | Low-to-medium fixed and per-package gain. Lazy loading must preserve validation timing, diagnostics, and offline behavior. | Load version metadata only when a consumer requests it, with zero eager loads on the target path and unchanged outputs and failures. |
+| 13 | **Index dependency conflicts.** **Evidence:** repeated conflict scans expose worst-case O(n^2) growth. | Medium large-graph gain. The index must preserve conflict precedence, source attribution, and deterministic diagnostics. | Build one run-scoped index, keep lookup work near O(nodes + edges), and keep a 10x-input scaling ratio below 20x with identical conflict results. |
+
 ## Non-goals
 
-- Do not optimize the download phase, primitive discovery, uv launcher, or
-  compile scaling in this plan.
+- Do not optimize the previously traced 70 ms download phase, primitive
+  discovery, uv launcher, or compile scaling. This does not prohibit removing
+  measured duplicate hashing or reducing Git object transfer on full-package
+  cache misses.
 - Do not parallelize integration writes before a separate ownership,
   transaction, and rollback design exists.
 - Do not weaken correctness checks, scaling guards, report validation, or

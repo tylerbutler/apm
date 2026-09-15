@@ -207,17 +207,21 @@ STALE_SHA = "c" * 40
 class _FakeUpdateModeRefs:
     """Stand-in for ``downloader._refs`` used in the #2342 regression test.
 
-    Makes the L1 commits-API path unavailable and returns NETWORK_SHA from the
-    authenticated L3 legacy-clone path. The test proves the stale L2 answer is
-    bypassed when current remote state is required.
+    Makes the exact remote path unavailable and returns NETWORK_SHA from the
+    authenticated L3 legacy-clone path. The test proves the stale bare answer
+    and commits API are bypassed when current remote state is required.
     """
 
     def __init__(self) -> None:
         self.commits_api_calls = 0
+        self.remote_ref_calls = 0
         self.legacy_clone_calls = 0
 
     def resolve_commit_sha_for_ref(self, dep_ref, ref):
         self.commits_api_calls += 1
+
+    def resolve_remote_ref(self, dep_ref, ref):
+        self.remote_ref_calls += 1
 
     def resolve(self, repo_ref):
         self.legacy_clone_calls += 1
@@ -238,8 +242,9 @@ def test_update_mode_bypasses_stale_bare_cache():
     - The upstream has advanced to NETWORK_SHA.
     - ``apm update`` (update_refs=True) must return NETWORK_SHA, not STALE_SHA.
 
-    The resolution waterfall is L0 (miss) -> L1 (unavailable) -> L3
-    (authenticated clone = NETWORK_SHA). STALE_SHA is never consulted.
+    The resolution waterfall is L0 (miss) -> exact remote (unavailable) -> L3
+    (authenticated clone = NETWORK_SHA). STALE_SHA and the commits API are
+    never consulted.
     """
     from apm_cli.deps.tiered_ref_resolver import L2BareRevParse
 
@@ -271,8 +276,9 @@ def test_update_mode_bypasses_stale_bare_cache():
         "L2BareRevParse may be returning a stale cached value (#2342)."
     )
     assert result.resolved_commit != STALE_SHA
-    # L1 was unavailable, so the authenticated L3 transport established truth.
-    assert fake_refs.commits_api_calls == 1
+    # The exact lookup missed, so the authenticated L3 transport established truth.
+    assert fake_refs.commits_api_calls == 0
+    assert fake_refs.remote_ref_calls == 1
     assert fake_refs.legacy_clone_calls == 1
-    assert resolver.stats["commits_api"] == 0
+    assert "commits_api" not in resolver.stats
     assert resolver.stats["legacy_clone"] == 1

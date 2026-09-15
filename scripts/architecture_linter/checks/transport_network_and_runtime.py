@@ -242,7 +242,7 @@ def _check_targeted_remote_ref_resolution(
             (
                 "class L2RemoteRef:",
                 "self._resolver.resolve_remote_ref(dep_ref, ref)",
-                "allow_syntax_type_hint=not freshness_policy.requires_remote",
+                "tiers.append(L1CommitsAPI(host=downloader))",
                 "if freshness_policy.requires_remote:",
                 "tiers.append(L2RemoteRef(resolver=legacy_inner))",
             ),

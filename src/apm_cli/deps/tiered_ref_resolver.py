@@ -11,14 +11,17 @@ This module collapses that work via a policy-specific tier waterfall executed by
 
 * **L0 PerRunCache** -- in-memory typed ``{(url, ref): resolution}``. Zero I/O.
   Catches the duplicate-within-run case (9 deps -> 3 underlying resolves).
-* **L1 CommitsAPI** -- cheap ``GET /repos/.../commits/{ref}`` against the
-  GitHub-family host_backend, with ``Accept: application/vnd.github.sha``
-  + optional ``HttpCache`` ETag. ~1 RTT.
 * **L2 BareRevParse** -- if the cross-run :class:`GitCache` already has a
   bare clone of the URL, resolve the exact branch or tag against it.
-  Zero network. Catches the second-run case.
+  Zero network. Catches the second-run reproducible case before an API request.
+* **L1 CommitsAPI** -- for reproducible cache misses, use a cheap
+  ``GET /repos/.../commits/{ref}`` against the GitHub-family host_backend,
+  with ``Accept: application/vnd.github.sha`` + optional ``HttpCache`` ETag.
+  ~1 RTT.
 * **L2 RemoteRef** -- for current-remote resolution, query only the exact
   branch, tag, and peeled-tag refs through the authenticated transport owner.
+  This policy omits the commits API because its result cannot establish branch
+  versus tag identity.
 * **L3 LegacyClone** -- delegates to the legacy
   :meth:`GitReferenceResolver.resolve` (shallow clone + introspect).
   Behaviourally identical to the pre-#1369 path; always succeeds or
@@ -240,8 +243,8 @@ class L1CommitsAPI:
     makes one HTTP attempt so rate limiting cannot delay L2/L3 fallback.
     Returns ``None`` for hosts whose backend has no cheap commits endpoint
     (e.g. ADO today); the caller then falls through to L2/L3.
-    Current-remote stacks also treat a named-ref API result as non-terminal:
-    the exact remote tier must establish branch versus tag before caching.
+    This tier is used only by reproducible stacks. Current-remote stacks omit
+    it because the exact remote tier must establish branch versus tag identity.
 
     Future: an explicit :class:`HttpCache` ETag pass could be added here
     for unauthenticated requests (the underlying helper does not yet
@@ -312,9 +315,9 @@ class L2BareRevParse:
     """Resolve by ``git rev-parse`` against an already-cached bare clone.
 
     No network. Hits only when :class:`GitCache` has a bare clone of the
-    URL from a previous run. Cheap follow-up tier after L0/L1 miss --
-    catches repeat reproducible installs where the bare exists but the cheap
-    API is unavailable (e.g. ADO). Current-state commands exclude this tier.
+    URL from a previous run. Reproducible stacks run this tier before the
+    commits API so warm installs avoid network access. Current-state commands
+    exclude this tier.
     """
 
     name = "bare_rev_parse"
@@ -689,15 +692,10 @@ def build_tiered_ref_resolver(
         return None
     legacy = L3LegacyClone(legacy_inner)
 
-    tiers: list[RefResolutionTier] = [
-        L0PerRunCache(cache=cache),
-        L1CommitsAPI(
-            host=downloader,
-            allow_syntax_type_hint=not freshness_policy.requires_remote,
-        ),
-    ]
+    tiers: list[RefResolutionTier] = [L0PerRunCache(cache=cache)]
     if freshness_policy.allows_bare_cache:
         tiers.append(L2BareRevParse(git_cache=git_cache))
+        tiers.append(L1CommitsAPI(host=downloader))
     else:
         _log.debug(
             "TieredRefResolver: L2BareRevParse excluded by %s policy",
