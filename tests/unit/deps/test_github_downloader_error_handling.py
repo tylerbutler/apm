@@ -1154,6 +1154,7 @@ class TestDownloadPackage:
         dep = _make_dep()
         resolved = _make_resolved(ref_type=GitReferenceType.BRANCH)
         repo_mock = MagicMock()
+        repo_mock.head.commit.hexsha = resolved.resolved_commit
         validation = MagicMock()
         validation.is_valid = True
         validation.package = MagicMock()
@@ -1451,6 +1452,7 @@ class TestPersistentGitCacheInDownloadPackage:
         downloader.persistent_git_cache = cache
 
         repo_mock = MagicMock()
+        repo_mock.head.commit.hexsha = resolved.resolved_commit
         validation = MagicMock()
         validation.is_valid = True
         validation.package = MagicMock()

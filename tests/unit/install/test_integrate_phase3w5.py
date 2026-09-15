@@ -57,6 +57,7 @@ def _make_dep_ref(key="org/pkg", is_local=False, alias=None, reference=None):
     dep.get_install_path.side_effect = lambda d: d / key
     dep.alias = alias
     dep.is_local = is_local
+    dep.is_virtual = False
     dep.local_path = None if not is_local else "./local"
     dep.reference = reference
     dep.repo_url = key
@@ -421,6 +422,49 @@ class TestResolveDownloadStrategy:
             "re-download must be skipped when callback SHA matches remote SHA"
         )
 
+    def test_callback_sha_match_ignores_stale_lockfile_hash(self, tmp_path: Path) -> None:
+        """Fresh callback content must not be compared with the previous commit's hash."""
+        from apm_cli.install.phases.integrate import _resolve_download_strategy
+
+        ctx = _make_ctx(tmp_path)
+        ctx.update_refs = True
+
+        locked_dep = MagicMock()
+        locked_dep.resolved_commit = "stale_sha"
+        locked_dep.content_hash = "stale_content_hash"
+        locked_dep.source = "git"
+        locked_dep.registry_prefix = None
+        lf = MagicMock()
+        lf.get_dependency.return_value = locked_dep
+        ctx.existing_lockfile = lf
+
+        dep_ref = _make_dep_ref(reference="main")
+        ctx.callback_downloaded["org/pkg"] = "new_sha"
+
+        install_path = tmp_path / "pkg"
+        install_path.mkdir()
+
+        mock_resolved = MagicMock()
+        mock_resolved.resolved_commit = "new_sha"
+        mock_resolved.ref_type = None
+        ctx.downloader.resolve_git_reference.return_value = mock_resolved
+
+        with (
+            patch("apm_cli.drift.detect_ref_change", return_value=False),
+            patch("apm_cli.install.phases.heal.run_heal_chain", return_value=(False, False)),
+            patch(
+                "apm_cli.utils.content_hash.verify_package_hash",
+                side_effect=AssertionError("stale lockfile hash must not be checked"),
+            ),
+            patch("apm_cli.utils.path_security.safe_rmtree") as safe_rmtree,
+        ):
+            _resolved_ref, skip_download, _locked, _changed = _resolve_download_strategy(
+                ctx, dep_ref, install_path
+            )
+
+        assert skip_download
+        safe_rmtree.assert_not_called()
+
     def test_callback_sha_mismatch_does_not_skip_redownload(self, tmp_path: Path) -> None:
         """Issue #551 negative gate: when callback SHA differs from the resolved
         remote SHA, the dep must be re-downloaded (content may have changed between
@@ -464,6 +508,35 @@ class TestResolveDownloadStrategy:
             "issue #551: callback SHA differs from remote SHA -- "
             "re-download must proceed so fresh content is materialized"
         )
+
+    def test_virtual_callback_sha_match_does_not_skip_redownload(self, tmp_path: Path) -> None:
+        """Virtual downloads lack a checkout that binds their bytes to the SHA."""
+        from apm_cli.install.phases.integrate import _resolve_download_strategy
+
+        ctx = _make_ctx(tmp_path)
+        ctx.update_refs = True
+
+        dep_ref = _make_dep_ref(reference="main")
+        dep_ref.is_virtual = True
+        ctx.callback_downloaded["org/pkg"] = "new_sha"
+
+        install_path = tmp_path / "pkg"
+        install_path.mkdir()
+
+        mock_resolved = MagicMock()
+        mock_resolved.resolved_commit = "new_sha"
+        mock_resolved.ref_type = None
+        ctx.downloader.resolve_git_reference.return_value = mock_resolved
+
+        with (
+            patch("apm_cli.drift.detect_ref_change", return_value=False),
+            patch("apm_cli.install.phases.heal.run_heal_chain", return_value=(False, False)),
+        ):
+            _resolved_ref, skip_download, _locked, _changed = _resolve_download_strategy(
+                ctx, dep_ref, install_path
+            )
+
+        assert not skip_download
 
     def test_callback_sha_match_no_resolved_ref_does_not_skip(self, tmp_path: Path) -> None:
         """Issue #551 boundary: when resolve_git_reference fails or returns no commit,

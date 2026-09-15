@@ -1967,28 +1967,27 @@ class GitHubPackageDownloader:
             # Clone the repository using fallback authentication methods
             # Use shallow clone for performance if we have a specific commit
             if resolved_ref.ref_type == GitReferenceType.COMMIT:
-                # For commits, we need to clone and checkout the specific commit
                 progress_reporter = (
                     GitProgressReporter(progress_task_id, progress_obj, package_display_name)
                     if progress_task_id and progress_obj
                     else None
                 )
-                self._clone_with_fallback(
+                cloned_repo = self._clone_with_fallback(
                     dep_ref.repo_url,
                     target_path,
                     progress_reporter=progress_reporter,
                     dep_ref=dep_ref,
                     verbose_callback=verbose_callback,
                 )
+                cloned_repo.close()
                 checkout_git_worktree(target_path, resolved_ref.resolved_commit, env=self.git_env)
             else:
-                # For branches and tags, we can use shallow clone
                 progress_reporter = (
                     GitProgressReporter(progress_task_id, progress_obj, package_display_name)
                     if progress_task_id and progress_obj
                     else None
                 )
-                self._clone_with_fallback(
+                cloned_repo = self._clone_with_fallback(
                     dep_ref.repo_url,
                     target_path,
                     progress_reporter=progress_reporter,
@@ -1997,6 +1996,23 @@ class GitHubPackageDownloader:
                     depth=1,
                     branch=resolved_ref.ref_name,
                 )
+                expected_commit = resolved_ref.resolved_commit
+                try:
+                    cloned_commit = cloned_repo.head.commit.hexsha
+                finally:
+                    cloned_repo.close()
+                if expected_commit and cloned_commit != expected_commit:
+                    _rmtree(target_path)
+                    target_path.mkdir(parents=True, exist_ok=True)
+                    cloned_repo = self._clone_with_fallback(
+                        dep_ref.repo_url,
+                        target_path,
+                        progress_reporter=progress_reporter,
+                        dep_ref=dep_ref,
+                        verbose_callback=verbose_callback,
+                    )
+                    cloned_repo.close()
+                    checkout_git_worktree(target_path, expected_commit, env=self.git_env)
 
             # Disable progress reporter to prevent late git updates
             if progress_reporter:

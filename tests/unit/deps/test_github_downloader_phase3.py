@@ -1138,6 +1138,7 @@ class TestDownloadPackage:
         dep = _make_dep()
         resolved = _make_resolved(ref_type=GitReferenceType.BRANCH)
         repo_mock = MagicMock()
+        repo_mock.head.commit.hexsha = resolved.resolved_commit
         validation = MagicMock()
         validation.is_valid = True
         validation.package = MagicMock()
@@ -1219,7 +1220,9 @@ class TestDownloadPackage:
                 ),
                 encoding="utf-8",
             )
-            return MagicMock()
+            repo = MagicMock()
+            repo.head.commit.hexsha = resolved.resolved_commit
+            return repo
 
         with (
             patch.object(downloader, "_is_artifactory_only", return_value=False),
@@ -1256,7 +1259,9 @@ class TestDownloadPackage:
                 ),
                 encoding="utf-8",
             )
-            return MagicMock()
+            repo = MagicMock()
+            repo.head.commit.hexsha = resolved.resolved_commit
+            return repo
 
         with (
             patch.object(downloader, "_is_artifactory_only", return_value=False),
@@ -1347,6 +1352,52 @@ class TestDownloadPackage:
         ):
             downloader.download_package(dep, tmp_path / "pkg")
         checkout.assert_called_once_with(tmp_path / "pkg", sha, env=downloader.git_env)
+
+    def test_mutable_ref_race_retries_and_checks_out_resolved_commit(
+        self, downloader: GitHubPackageDownloader, tmp_path: Path
+    ) -> None:
+        resolved = _make_resolved(
+            ref="main",
+            ref_type=GitReferenceType.BRANCH,
+            commit="a" * 40,
+        )
+        shallow_repo = MagicMock()
+        shallow_repo.head.commit.hexsha = "b" * 40
+        full_repo = MagicMock()
+        validation = MagicMock()
+        validation.is_valid = True
+        validation.package = MagicMock()
+        validation.package_type = MagicMock()
+        pkg = MagicMock()
+
+        with (
+            patch.object(downloader, "_is_artifactory_only", return_value=False),
+            patch.object(downloader, "_parse_artifactory_base_url", return_value=None),
+            patch.object(downloader, "_should_use_artifactory_proxy", return_value=False),
+            patch.object(downloader, "resolve_git_reference", return_value=resolved),
+            patch.object(
+                downloader,
+                "_clone_with_fallback",
+                side_effect=[shallow_repo, full_repo],
+            ) as clone,
+            patch("apm_cli.deps.github_downloader.validate_apm_package", return_value=validation),
+            patch("apm_cli.deps.github_downloader._rmtree"),
+            patch("apm_cli.deps.package_validator.stamp_plugin_version"),
+            patch("apm_cli.deps._shared._validate_and_load_package", return_value=pkg),
+            patch("apm_cli.deps.github_downloader.checkout_git_worktree") as checkout,
+        ):
+            downloader.download_package(_make_dep(), tmp_path / "pkg")
+
+        assert clone.call_count == 2
+        assert clone.call_args_list[0].kwargs["depth"] == 1
+        assert clone.call_args_list[0].kwargs["branch"] == "main"
+        assert "depth" not in clone.call_args_list[1].kwargs
+        assert "branch" not in clone.call_args_list[1].kwargs
+        checkout.assert_called_once_with(
+            tmp_path / "pkg",
+            resolved.resolved_commit,
+            env=downloader.git_env,
+        )
 
     def test_virtual_artifactory_subdir_routes_to_artifactory(
         self, downloader: GitHubPackageDownloader, tmp_path: Path
@@ -1548,6 +1599,7 @@ class TestPersistentGitCacheInDownloadPackage:
         downloader.persistent_git_cache = cache
 
         repo_mock = MagicMock()
+        repo_mock.head.commit.hexsha = resolved.resolved_commit
         validation = MagicMock()
         validation.is_valid = True
         validation.package = MagicMock()
