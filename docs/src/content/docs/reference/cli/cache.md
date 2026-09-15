@@ -163,10 +163,10 @@ Inside the cache root:
 <cache-root>/
   git/
     db_v1/           # bare repository databases
-                     #   <shard>/      -- full bare clone (default)
-                     #   <shard>__p/   -- partial bare clone
-                     #                    (--filter=blob:none) used
-                     #                    for sparse-checkout consumers
+                     #   <shard>__p/   -- blobless bare clone
+                     #                    (--filter=blob:none) shared by
+                     #                    full and sparse checkouts
+                     #   <shard>/      -- reusable legacy full bare clone
     checkouts_v1/    # per-SHA worktree checkouts, variant-keyed
                      #   <shard>/<sha>/full/             -- full tree
                      #   <shard>/<sha>/sparse-<hash>/    -- sparse cone, or a
@@ -179,12 +179,15 @@ Inside the cache root:
   http_v1/           # conditional-GET response cache
 ```
 
-The `full/` and `sparse-<variant>/` subdirs let two consumers of the
-same commit share storage when they want the same subdirs, and keep
-distinct shards when they do not -- without the variant suffix the
-sparse checkout would clobber the full tree for any other consumer
-of that SHA. A sparse variant widens to the full tree when a package
-symlink targets a tracked file excluded from the sparse cone, so that
+New cache misses use one blobless bare for both full and sparse checkout
+variants. Git hydrates the selected commit during the authenticated checkout
+operation, but does not retain the upstream promisor URL in the checkout.
+Existing legacy full bares remain reusable.
+
+The `full/` and `sparse-<variant>/` subdirs let two consumers of the same commit
+share storage when they want the same subdirs, and keep distinct checkout
+shards when they do not. A sparse variant widens to the full tree when a
+package symlink targets a tracked file excluded from the sparse cone, so that
 variant can consume more disk than its name suggests.
 
 The cache root is created with mode `0700` and validated to be

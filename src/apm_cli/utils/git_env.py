@@ -1190,6 +1190,37 @@ def git_network_env(
     return env
 
 
+def git_promisor_env(
+    remote_url: str,
+    overrides: dict[str, object] | None = None,
+    *,
+    git_dir: Path | None = None,
+    worktree: Path | None = None,
+    remote_name: str = "apm-promisor",
+) -> dict[str, str]:
+    """Return a validated network environment with transient promisor config.
+
+    The upstream URL and partial-clone settings exist only in the child
+    process. They are not written to the checkout, so later Git commands
+    cannot lazy-fetch with ambient or differently scoped credentials.
+    """
+    env = git_network_env(
+        remote_url,
+        overrides,
+        git_dir=git_dir,
+        worktree=worktree,
+    )
+    _append_git_config_entry(env, f"remote.{remote_name}.url", remote_url)
+    _append_git_config_entry(env, f"remote.{remote_name}.promisor", "true")
+    _append_git_config_entry(
+        env,
+        f"remote.{remote_name}.partialclonefilter",
+        "blob:none",
+    )
+    _append_git_config_entry(env, "extensions.partialClone", remote_name)
+    return env
+
+
 def git_clone_env(
     remote_url: str,
     overrides: dict[str, object] | None,

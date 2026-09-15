@@ -70,6 +70,13 @@
       "guards": ["transport-platform-git-cache-identity"]
     },
     {
+      "id": "git-cache-materialization",
+      "decision": "Persistent bare layout, blobless clone fallback, and authenticated checkout hydration",
+      "owner": "cache/git_cache.py (GitCache), delegating process-scoped network config to utils/git_env.py",
+      "selectors": ["src/apm_cli/cache/git_cache.py"],
+      "guards": ["transport-platform-git-cache-materialization"]
+    },
+    {
       "id": "git-child-repository-isolation",
       "decision": "Git child-process repository location and URL rewrite safety",
       "owner": "utils/git_env.py (network execution config, URL rewrite validation, and Git auth-channel scrubbing)",

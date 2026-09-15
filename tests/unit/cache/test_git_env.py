@@ -20,6 +20,7 @@ from apm_cli.utils.git_env import (
     get_gh_executable,
     get_git_executable,
     git_network_env,
+    git_promisor_env,
     git_remote_refs,
     git_subprocess_env,
     git_subprocess_error_text,
@@ -41,6 +42,36 @@ def _run_real_git_config_and_fake_clone(args, **kwargs):
     if len(args) > 1 and args[1] == "config":
         return _REAL_SUBPROCESS_RUN(args, **kwargs)
     return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
+
+def test_git_promisor_env_appends_process_scoped_remote_config(tmp_path: Path) -> None:
+    """Promisor setup preserves validated config without writing repository state."""
+    base = {
+        "GIT_CONFIG_COUNT": "1",
+        "GIT_CONFIG_KEY_0": "http.extraheader",
+        "GIT_CONFIG_VALUE_0": "Authorization: Bearer sentinel",
+    }
+    url = "https://git.example.com/acme/repo"
+
+    with patch("apm_cli.utils.git_env.git_network_env", return_value=base.copy()) as network:
+        child = git_promisor_env(url, {"PATH": "/usr/bin"}, worktree=tmp_path)
+
+    network.assert_called_once_with(
+        url,
+        {"PATH": "/usr/bin"},
+        git_dir=None,
+        worktree=tmp_path,
+    )
+    entries = {
+        child[f"GIT_CONFIG_KEY_{index}"]: child[f"GIT_CONFIG_VALUE_{index}"]
+        for index in range(int(child["GIT_CONFIG_COUNT"]))
+    }
+    assert entries["http.extraheader"] == "Authorization: Bearer sentinel"
+    assert entries["remote.apm-promisor.url"] == url
+    assert entries["remote.apm-promisor.promisor"] == "true"
+    assert entries["remote.apm-promisor.partialclonefilter"] == "blob:none"
+    assert entries["extensions.partialClone"] == "apm-promisor"
+    assert child is not base
 
 
 class TestGetGitExecutable:

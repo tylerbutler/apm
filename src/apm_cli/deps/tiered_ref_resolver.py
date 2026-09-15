@@ -336,25 +336,11 @@ class L2BareRevParse:
             )
 
         try:
-            from ..cache.url_normalize import cache_shard_key
+            bare_dir = self._git_cache.find_cached_bare(dep_ref.to_github_url())
         except Exception:
             return None
 
-        try:
-            shard_key = cache_shard_key(dep_ref.to_github_url())
-        except Exception:
-            return None
-
-        # Reach into GitCache's bare DB dir. We avoid calling
-        # GitCache.get_checkout() (which would trigger a fresh clone +
-        # ls-remote if missing). Bare path layout is stable per
-        # cache/git_cache.py:226.
-        try:
-            bare_dir = self._git_cache._db_root / shard_key
-        except Exception:
-            return None
-
-        if not bare_dir.is_dir():
+        if bare_dir is None:
             return None
 
         return self._rev_parse(bare_dir, ref)

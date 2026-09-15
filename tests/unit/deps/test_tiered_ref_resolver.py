@@ -240,13 +240,13 @@ def test_l2_returns_none_when_no_git_cache():
 
 
 def test_l2_returns_none_when_bare_dir_missing(tmp_path):
-    fake_cache = types.SimpleNamespace(_db_root=tmp_path / "nonexistent")
+    fake_cache = types.SimpleNamespace(find_cached_bare=lambda _url: None)
     tier = L2BareRevParse(git_cache=fake_cache)
     assert tier.try_resolve(_dep(), "main") is None
 
 
 def test_l2_short_circuits_on_sha_input():
-    fake_cache = types.SimpleNamespace(_db_root=None)
+    fake_cache = types.SimpleNamespace(find_cached_bare=lambda _url: None)
     tier = L2BareRevParse(git_cache=fake_cache)
     assert tier.try_resolve(_dep(ref=SHA_A), SHA_A) == _resolution(
         ref_type=GitReferenceType.COMMIT,
@@ -268,7 +268,7 @@ def test_l2_short_circuits_on_sha_input():
 def test_l2_rev_parse_uses_git_cache_repository_identity(tmp_path, dependency):
     bare = tmp_path / cache_shard_key(dependency.to_github_url())
     bare.mkdir(parents=True)
-    fake_cache = types.SimpleNamespace(_db_root=tmp_path)
+    fake_cache = types.SimpleNamespace(find_cached_bare=lambda _url: bare)
     tier = L2BareRevParse(git_cache=fake_cache)
 
     resolution = _resolution()
@@ -663,7 +663,7 @@ def test_stale_bare_bypassed_on_update(monkeypatch, tmp_path):
 
     bare = tmp_path / cache_shard_key(_dep().to_github_url())
     bare.mkdir(parents=True)
-    git_cache = types.SimpleNamespace(_db_root=tmp_path)
+    git_cache = types.SimpleNamespace(find_cached_bare=lambda _url: bare)
     downloader = MagicMock()
     fake_refs = MagicMock()
     fake_refs.resolve_commit_sha_for_ref.return_value = None
@@ -700,7 +700,7 @@ def test_normal_policy_uses_l2_without_network_or_clone(monkeypatch, tmp_path):
     monkeypatch.setenv("APM_TIERED_RESOLVER", "1")
     bare = tmp_path / cache_shard_key(_dep().to_github_url())
     bare.mkdir(parents=True)
-    git_cache = types.SimpleNamespace(_db_root=tmp_path)
+    git_cache = types.SimpleNamespace(find_cached_bare=lambda _url: bare)
     downloader = MagicMock()
     fake_refs = MagicMock()
     fake_refs.resolve_commit_sha_for_ref.return_value = None

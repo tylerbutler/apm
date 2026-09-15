@@ -131,7 +131,7 @@ def _check_git_cache_identity(provider: FactsProvider) -> tuple[Violation, ...]:
             _RID_CACHE,
             _TIERED,
             (
-                "cache_shard_key(dep_ref.to_github_url())",
+                "self._git_cache.find_cached_bare(dep_ref.to_github_url())",
                 "return normalize_repo_url(dep_ref.to_github_url())",
             ),
             "Tiered ref resolution must reuse the persistent Git cache identity",

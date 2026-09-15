@@ -108,16 +108,25 @@ class TestGetCheckout:
             patch.object(cache, "_resolve_sha", return_value=sha),
             patch("apm_cli.cache.git_cache.verify_checkout_sha", return_value=False),
             patch.object(cache, "_evict_checkout") as mock_evict,
-            patch.object(cache, "_ensure_bare_repo") as mock_ensure,
+            patch.object(
+                cache, "_ensure_bare_repo", return_value=cache._db_root / "bare"
+            ) as mock_ensure,
+            patch.object(cache, "_bare_uses_blobless_filter", return_value=True),
             patch.object(cache, "_create_checkout", return_value=recreated) as mock_create,
         ):
             result = cache.get_checkout(url, "main")
 
         assert result == recreated
         mock_evict.assert_called_once_with(checkout_dir)
-        mock_ensure.assert_called_once_with(url, cache_shard_key(url), sha, env=None, partial=False)
+        mock_ensure.assert_called_once_with(url, cache_shard_key(url), sha, env=None, partial=True)
         mock_create.assert_called_once_with(
-            url, cache_shard_key(url), sha, env=None, sparse_paths=None, promisor_url=None
+            url,
+            cache_shard_key(url),
+            sha,
+            env=None,
+            sparse_paths=None,
+            promisor_url=url,
+            bare_dir=cache._db_root / "bare",
         )
 
     def test_refresh_ignores_existing_checkout(self, tmp_path: Path) -> None:
@@ -151,17 +160,26 @@ class TestGetCheckout:
 
         with (
             patch.object(cache, "_resolve_sha", return_value=sha),
-            patch.object(cache, "_ensure_bare_repo") as mock_ensure,
+            patch.object(
+                cache, "_ensure_bare_repo", return_value=cache._db_root / "bare"
+            ) as mock_ensure,
+            patch.object(cache, "_bare_uses_blobless_filter", return_value=True),
             patch.object(cache, "_create_checkout", return_value=checkout_dir) as mock_create,
         ):
             result = cache.get_checkout(url, None, locked_sha=sha, env={"A": "1"})
 
         assert result == checkout_dir
         mock_ensure.assert_called_once_with(
-            url, cache_shard_key(url), sha, env={"A": "1"}, partial=False
+            url, cache_shard_key(url), sha, env={"A": "1"}, partial=True
         )
         mock_create.assert_called_once_with(
-            url, cache_shard_key(url), sha, env={"A": "1"}, sparse_paths=None, promisor_url=None
+            url,
+            cache_shard_key(url),
+            sha,
+            env={"A": "1"},
+            sparse_paths=None,
+            promisor_url=url,
+            bare_dir=cache._db_root / "bare",
         )
 
 
@@ -627,11 +645,12 @@ class TestBareHasSha:
         bare_dir = tmp_path / "bare.git"
         bare_dir.mkdir()
         with (
-            patch("subprocess.run", return_value=_proc(stdout="commit\n")),
+            patch("subprocess.run", return_value=_proc(stdout="commit\n")) as mock_run,
             patch("apm_cli.utils.git_env.get_git_executable", return_value="git"),
             patch("apm_cli.utils.git_env.git_subprocess_env", return_value={}),
         ):
             assert cache._bare_has_sha(bare_dir, "a" * 40) is True
+        assert mock_run.call_args.kwargs["env"]["GIT_NO_LAZY_FETCH"] == "1"
 
     def test_returns_false_when_git_reports_non_commit(
         self, cache: GitCache, tmp_path: Path
@@ -664,6 +683,23 @@ class TestBareHasSha:
             patch("apm_cli.utils.git_env.git_subprocess_env", return_value={}),
         ):
             assert cache._bare_has_sha(bare_dir, "d" * 40) is False
+
+
+class TestBareFilterState:
+    def test_detects_non_default_promisor_remote(self, cache: GitCache, tmp_path: Path) -> None:
+        bare_dir = tmp_path / "bare.git"
+        bare_dir.mkdir()
+        with (
+            patch(
+                "subprocess.run",
+                return_value=_proc(
+                    stdout="remote.upstream.partialclonefilter blob:none\n",
+                ),
+            ),
+            patch("apm_cli.utils.git_env.get_git_executable", return_value="git"),
+            patch("apm_cli.utils.git_env.git_subprocess_env", return_value={}),
+        ):
+            assert cache._bare_uses_blobless_filter(bare_dir) is True
 
 
 class TestFetchIntoBare:
@@ -716,6 +752,7 @@ class TestFetchIntoBareLocked:
             patch("subprocess.run", return_value=_proc()) as mock_run,
             patch("apm_cli.utils.git_env.get_git_executable", return_value="git"),
             patch("apm_cli.utils.git_env.git_subprocess_env", return_value={}),
+            patch.object(cache, "_bare_uses_blobless_filter", return_value=False),
         ):
             cache._fetch_into_bare_locked(bare_dir, "https://example.com/repo.git", "a" * 40)
 
@@ -742,6 +779,7 @@ class TestFetchIntoBareLocked:
             ) as mock_run,
             patch("apm_cli.utils.git_env.get_git_executable", return_value="git"),
             patch("apm_cli.utils.git_env.git_subprocess_env", return_value={}),
+            patch.object(cache, "_bare_uses_blobless_filter", return_value=False),
         ):
             cache._fetch_into_bare_locked(bare_dir, "https://example.com/repo.git", "b" * 40)
 
@@ -754,6 +792,31 @@ class TestFetchIntoBareLocked:
             "https://example.com/repo.git",
             "+refs/heads/*:refs/remotes/apm-fallback/*",
             "+refs/tags/*:refs/tags/*",
+        ]
+
+    def test_blobless_fetch_preserves_filter_from_repository_state(
+        self, cache: GitCache, tmp_path: Path
+    ) -> None:
+        bare_dir = tmp_path / "bare.git"
+        bare_dir.mkdir()
+
+        with (
+            patch("subprocess.run", return_value=_proc()) as mock_run,
+            patch("apm_cli.utils.git_env.get_git_executable", return_value="git"),
+            patch("apm_cli.utils.git_env.git_subprocess_env", return_value={}),
+            patch.object(cache, "_bare_uses_blobless_filter", return_value=True),
+        ):
+            cache._fetch_into_bare_locked(
+                bare_dir,
+                "https://example.com/repo.git",
+                "c" * 40,
+            )
+
+        fetch_args = mock_run.call_args.args[0]
+        assert fetch_args[-3:] == [
+            "--filter=blob:none",
+            "https://example.com/repo.git",
+            "c" * 40,
         ]
 
 

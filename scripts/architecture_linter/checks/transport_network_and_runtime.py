@@ -263,6 +263,70 @@ def _check_targeted_remote_ref_resolution(
     return tuple(findings)
 
 
+_RID_GIT_CACHE_MATERIALIZATION = "transport-platform-git-cache-materialization"
+_GIT_CACHE = "src/apm_cli/cache/git_cache.py"
+_GIT_ENV = "src/apm_cli/utils/git_env.py"
+
+
+def _check_git_cache_materialization(provider: FactsProvider) -> tuple[Violation, ...]:
+    """Keep blobless cache selection and authenticated hydration centralized."""
+    inv = frozenset(provider.inventory)
+    findings = list(
+        _require_subs(
+            provider,
+            inv,
+            _RID_GIT_CACHE_MATERIALIZATION,
+            _GIT_CACHE,
+            (
+                "def find_cached_bare(",
+                "partial=True",
+                '"--origin=origin"',
+                "promisor_url = url if self._bare_uses_blobless_filter(",
+                "git_promisor_env(",
+            ),
+            "GitCache must own blobless bare selection and checkout hydration",
+        )
+    )
+    findings.extend(
+        _require_subs(
+            provider,
+            inv,
+            _RID_GIT_CACHE_MATERIALIZATION,
+            _GIT_ENV,
+            (
+                "def git_promisor_env(",
+                'f"remote.{remote_name}.url"',
+                'f"remote.{remote_name}.promisor"',
+                'f"remote.{remote_name}.partialclonefilter"',
+                '"extensions.partialClone"',
+            ),
+            "git_env must own process-scoped promisor configuration",
+        )
+    )
+    findings.extend(
+        _require_subs(
+            provider,
+            inv,
+            _RID_GIT_CACHE_MATERIALIZATION,
+            _TIERED,
+            ("self._git_cache.find_cached_bare(dep_ref.to_github_url())",),
+            "Warm ref resolution must use the GitCache layout API",
+        )
+    )
+    findings.extend(
+        _forbid_scan(
+            provider,
+            inv,
+            _RID_GIT_CACHE_MATERIALIZATION,
+            (_TIERED,),
+            re.compile(r"\._db_root"),
+            "Consumers must not derive the GitCache bare layout directly",
+            exempt=False,
+        )
+    )
+    return tuple(findings)
+
+
 _RID_SEMVER = "transport-platform-git-semver-preflight"
 _RID_SEMVER_AUTH = "transport-platform-git-semver-remote-auth"
 
@@ -622,6 +686,13 @@ RULES: tuple[Rule, ...] = (
         guard_ids=(_RID_TARGETED_REMOTE_REF,),
         description="Exact remote ref lookup stays owned by GitReferenceResolver.",
         check=_check_targeted_remote_ref_resolution,
+    ),
+    Rule(
+        id=_RID_GIT_CACHE_MATERIALIZATION,
+        group=GROUP,
+        guard_ids=(_RID_GIT_CACHE_MATERIALIZATION,),
+        description="GitCache owns blobless bare selection and authenticated hydration.",
+        check=_check_git_cache_materialization,
     ),
     Rule(
         id=_RID_SEMVER,

@@ -783,6 +783,14 @@ MUTATIONS: tuple[MutationCase, ...] = (
         intent="Shared clone cache keys on a raw URL instead of the normalized identity.",
     ),
     MutationCase(
+        guard_id="transport-platform-git-cache-materialization",
+        rule_id="transport-platform-git-cache-materialization",
+        path="src/apm_cli/cache/git_cache.py",
+        old="bare_dir = self._ensure_bare_repo(url, shard_key, sha, env=env, partial=True)",
+        new="bare_dir = self._ensure_bare_repo(url, shard_key, sha, env=env, partial=False)",
+        intent="Persistent cache misses stop selecting the canonical blobless bare policy.",
+    ),
+    MutationCase(
         guard_id="transport-platform-git-child-environment",
         rule_id="transport-platform-git-child-environment",
         path="src/apm_cli/utils/git_env.py",
