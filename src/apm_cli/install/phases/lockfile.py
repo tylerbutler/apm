@@ -67,7 +67,7 @@ class LockfileBuilder:
 
     # -- public API -----------------------------------------------------
 
-    def build_and_save(self) -> None:
+    def build_and_save(self) -> LockFile | None:
         """Assemble lockfile from ctx state and write it (no-op when nothing was installed)."""
         # Self-heal cache pin markers for remote deps recorded in the
         # PRE-EXISTING on-disk lockfile whose cached payload survives on
@@ -117,7 +117,9 @@ class LockfileBuilder:
             # ``_has_orphan_lockfile_entries``).
             self._reconcile_target_deployed_files(self.ctx.existing_lockfile)
             self._sync_cache_pin_markers_from_disk()
-            return
+            existing = self.ctx.existing_lockfile
+            self._publish_snapshot(existing)
+            return existing
         try:
             from apm_cli.deps.lockfile import LockFile as _LF
             from apm_cli.deps.lockfile import get_lockfile_path
@@ -154,7 +156,6 @@ class LockfileBuilder:
             # When installing a subset of packages (apm install <pkg>),
             # merge new entries into the existing lockfile instead of
             # overwriting it -- otherwise the uninstalled packages disappear.
-            lockfile = self._maybe_merge_partial(lockfile, lockfile_path, _LF)
             # Restore local compatibility state first so the canonical ledger is
             # complete when MCP target rows are projected into it.
             self._preserve_existing_local_state(lockfile)
@@ -164,7 +165,8 @@ class LockfileBuilder:
 
             # Only write when the semantic content has actually changed
             # (avoids generated_at churn in version control).
-            self._write_if_changed(lockfile, lockfile_path, _LF)
+            lockfile = self._write_if_changed(lockfile, lockfile_path, _LF)
+            self._publish_snapshot(lockfile)
             # Target-scoped deployed-file contraction physically deletes the
             # dropped target's instruction files (via the cleanup chokepoint).
             # Guard it by `lockfile_only` for the same reason the merge-hook
@@ -179,8 +181,10 @@ class LockfileBuilder:
             # _write_if_changed is a no-op, but markers must still be
             # written so the next `apm audit` drift replay succeeds.
             self._sync_cache_pin_markers(lockfile)
+            return lockfile
         except Exception as e:
             self._handle_failure(e)
+            return None
 
     # -- private helpers (verbatim from original inline block) ----------
 
@@ -420,15 +424,6 @@ class LockfileBuilder:
                     # the manifest (full install only). Don't preserve so the
                     # lockfile stays in sync with what apm.yml declares.
 
-    def _maybe_merge_partial(self, lockfile: LockFile, lockfile_path: Path, _LF: type) -> LockFile:
-        if self.ctx.only_packages:
-            existing = _LF.read(lockfile_path)
-            if existing:
-                for key, dep in lockfile.dependencies.items():  # noqa: B007
-                    existing.add_dependency(dep)
-                lockfile = existing
-        return lockfile
-
     def _preserve_existing_mcp_state(self, lockfile: LockFile) -> None:
         """Keep MCP fields until MCPIntegrator reconciles them later in install."""
         if self.ctx.existing_lockfile:
@@ -527,21 +522,50 @@ class LockfileBuilder:
             ):
                 dep.resolved_tag = prev.resolved_tag
 
-    def _write_if_changed(self, lockfile: LockFile, lockfile_path: Path, _LF: type) -> None:
+    def _write_if_changed(
+        self,
+        lockfile: LockFile,
+        lockfile_path: Path,
+        _LF: type,
+    ) -> LockFile:
         # Re-read the on-disk lockfile for the semantic comparison.
         # This is intentionally a FRESH read (not ctx.existing_lockfile)
-        # because the partial-install merge above may have modified the
-        # in-memory representation.
+        # so partial installs merge against the latest committed state and
+        # concurrent changes cannot be discarded by a stale run snapshot.
         existing_lockfile = _LF.read(lockfile_path) if lockfile_path.exists() else None
+        if self.ctx.only_packages and existing_lockfile:
+            merged = copy.deepcopy(existing_lockfile)
+            for dep in lockfile.dependencies.values():
+                merged.add_dependency(copy.deepcopy(dep))
+            lockfile = merged
         if existing_lockfile and lockfile.is_semantically_equivalent(existing_lockfile):
             if self.ctx.logger:
                 self.ctx.logger.verbose_detail("apm.lock.yaml unchanged -- skipping write")
+            return existing_lockfile
         else:
             lockfile.save(lockfile_path, existing_lockfile=existing_lockfile)
             if self.ctx.logger:
                 self.ctx.logger.verbose_detail(
                     f"Generated apm.lock.yaml with {len(lockfile.dependencies)} dependencies"
                 )
+            return lockfile
+
+    def _publish_snapshot(self, lockfile: LockFile | None) -> None:
+        """Publish the current parsed state for later install phases and callers."""
+        from apm_cli.deps.lockfile import get_lockfile_path
+        from apm_cli.install.lockfile_snapshot import LockfileSnapshot
+
+        apm_dir = getattr(self.ctx, "apm_dir", None)
+        if apm_dir is None:
+            return
+        lockfile_path = get_lockfile_path(apm_dir)
+        snapshot = getattr(self.ctx, "lockfile_snapshot", None)
+        if snapshot is None:
+            snapshot = LockfileSnapshot.supplied(lockfile_path, lockfile)
+            self.ctx.lockfile_snapshot = snapshot
+        else:
+            snapshot.require_path(lockfile_path)
+            snapshot.replace(lockfile)
 
     def _handle_failure(self, e: Exception) -> None:
         _lock_msg = f"Could not generate apm.lock.yaml: {e}"
@@ -663,24 +687,11 @@ class LockfileBuilder:
                 )
 
     def _sync_cache_pin_markers_from_disk(self) -> None:
-        """Self-heal markers from the on-disk lockfile when no install ran.
-
-        This handles the upgrade path: user installed an older APM,
-        runs the new APM with no manifest changes, expects the next
-        ``apm audit`` to find every remote dep correctly marked.
-        """
-        try:
-            from apm_cli.deps.lockfile import LockFile as _LF
-            from apm_cli.deps.lockfile import get_lockfile_path
-
-            lockfile_path = get_lockfile_path(self.ctx.apm_dir)
-            if not lockfile_path.exists():
-                return
-            lockfile = _LF.load_or_create(lockfile_path)
+        """Compatibility seam that now consumes the run-scoped snapshot."""
+        snapshot = getattr(self.ctx, "lockfile_snapshot", None)
+        lockfile = snapshot.lockfile if snapshot is not None else self.ctx.existing_lockfile
+        if lockfile is not None:
             self._sync_cache_pin_markers(lockfile)
-        except Exception as exc:
-            if self.ctx.logger:
-                self.ctx.logger.verbose_detail(f"Cache pin marker self-heal skipped: {exc}")
 
     def compute_deployed_hashes(self, rel_paths) -> dict[str, str]:
         """Delegate to the module-level canonical implementation."""

@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from apm_cli.core.target_detection import EffectiveTargetDecision
+    from apm_cli.install.lockfile_snapshot import LockfileSnapshot
 
 
 class InstallDisposition(str, Enum):
@@ -37,6 +38,7 @@ class InstallResult:
     target_decision: EffectiveTargetDecision | None = None
     exec_allow_map: dict[str, dict[str, bool]] | None = None
     exec_allow_resolved: bool = False
+    lockfile_snapshot: LockfileSnapshot | None = None
 
 
 @dataclass

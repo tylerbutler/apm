@@ -3,58 +3,22 @@
 Thin wiring layer  -- all command logic lives in ``apm_cli.commands.*`` modules.
 """
 
-# ruff: noqa: E402
-
 import ctypes
 import logging
 import os
 import sys
 import warnings
+from copy import copy
+from importlib import import_module
+from typing import Any
 
 import click
+from click.utils import make_default_short_help
 
-from apm_cli.core.tls_trust import configure_process_tls_trust, log_tls_trust_status
-
-configure_process_tls_trust()
-
-from apm_cli.commands._helpers import (
-    ERROR,
-    RESET,
-    WARNING,
-    _check_and_notify_updates,
-    print_version,
+from apm_cli.commands.registry import (
+    command_names,
+    get_command_entry,
 )
-from apm_cli.commands.approve import approve_cmd, deny_cmd
-from apm_cli.commands.audit import audit
-from apm_cli.commands.cache import cache
-from apm_cli.commands.compile import compile as compile_cmd
-from apm_cli.commands.config import config
-from apm_cli.commands.deps import deps
-from apm_cli.commands.discover import discover
-from apm_cli.commands.doctor import doctor
-from apm_cli.commands.experimental import experimental
-from apm_cli.commands.find import find as find_cmd
-from apm_cli.commands.init import init
-from apm_cli.commands.install import install
-from apm_cli.commands.lifecycle import lifecycle
-from apm_cli.commands.list_cmd import list as list_cmd
-from apm_cli.commands.lock import lock
-from apm_cli.commands.marketplace import marketplace
-from apm_cli.commands.marketplace import search as marketplace_search
-from apm_cli.commands.mcp import mcp
-from apm_cli.commands.outdated import outdated as outdated_cmd
-from apm_cli.commands.pack import pack_cmd, unpack_cmd
-from apm_cli.commands.plugin import plugin as plugin_cmd
-from apm_cli.commands.policy import policy
-from apm_cli.commands.prune import prune
-from apm_cli.commands.publish import publish_cmd
-from apm_cli.commands.run import preview, run
-from apm_cli.commands.runtime import runtime
-from apm_cli.commands.self_update import self_update
-from apm_cli.commands.targets import targets
-from apm_cli.commands.uninstall import uninstall
-from apm_cli.commands.update import update
-from apm_cli.commands.view import view as view_cmd
 
 _CLI_EPILOG = (
     "\b\n"
@@ -71,12 +35,100 @@ _CLI_EPILOG = (
 )
 
 
-class _OutputModeGroup(click.Group):
-    """Capture full argv so root output mode precedes subcommand callbacks."""
+class _LazyCommandGroup(click.Group):
+    """Resolve top-level commands lazily from the canonical static registry."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._command_cache: dict[str, click.Command] = {}
 
     def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
         ctx.meta["apm_raw_args"] = tuple(args)
         return super().parse_args(ctx, args)
+
+    def list_commands(self, ctx: click.Context) -> list[str]:
+        """Return complete command discovery without importing command modules."""
+        return list(command_names())
+
+    def get_command(self, ctx: click.Context, cmd_name: str) -> click.Command | None:
+        """Import and cache only the selected command."""
+        cached = self._command_cache.get(cmd_name)
+        if cached is not None:
+            return cached
+
+        entry = get_command_entry(cmd_name)
+        if entry is None:
+            return None
+
+        _initialize_command_tls()
+        module = import_module(entry.module)
+        command = getattr(module, entry.attribute)
+        if not isinstance(command, click.Command):
+            raise TypeError(
+                f"Registered CLI target {entry.module}:{entry.attribute} is not a Click command"
+            )
+        if entry.clone:
+            command = copy(command)
+            command.name = entry.name
+            command.params = list(command.params)
+            command.hidden = entry.hidden
+        self._command_cache[cmd_name] = command
+        return command
+
+    def format_commands(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
+        """Render root command help directly from static registry metadata."""
+        entries = [
+            entry
+            for name in self.list_commands(ctx)
+            if (entry := get_command_entry(name)) is not None and not entry.hidden
+        ]
+        if not entries:
+            return
+
+        limit = formatter.width - 6 - max(len(entry.name) for entry in entries)
+        rows = [
+            (
+                entry.name,
+                entry.short_help.strip()
+                if entry.short_help
+                else make_default_short_help(entry.help, limit),
+            )
+            for entry in entries
+        ]
+        with formatter.section("Commands"):
+            formatter.write_dl(rows)
+
+
+def _print_version(
+    ctx: click.Context,
+    param: click.Parameter | None,
+    value: bool,
+) -> None:
+    """Load the lightweight version renderer only for ``--version``."""
+    from apm_cli.version import print_version
+
+    print_version(ctx, param, value)
+
+
+def _check_and_notify_updates() -> None:
+    """Load update notification helpers only for a valid command invocation."""
+    from apm_cli.commands._helpers import _check_and_notify_updates as notify
+
+    notify()
+
+
+def _initialize_command_tls() -> None:
+    """Initialize process TLS once before importing a selected command."""
+    from apm_cli.core.tls_trust import configure_process_tls_trust
+
+    configure_process_tls_trust()
+
+
+def _log_command_tls_status() -> None:
+    """Log the selected trust source after root logging is configured."""
+    from apm_cli.core.tls_trust import log_tls_trust_status
+
+    log_tls_trust_status()
 
 
 def _configure_logging(verbose: bool = False) -> None:
@@ -127,14 +179,14 @@ def _configure_logging(verbose: bool = False) -> None:
 
 
 @click.group(
-    cls=_OutputModeGroup,
+    cls=_LazyCommandGroup,
     help="Agent Package Manager (APM): The package manager for AI-Native Development",
     epilog=_CLI_EPILOG,
 )
 @click.option(
     "--version",
     is_flag=True,
-    callback=print_version,
+    callback=_print_version,
     expose_value=False,
     is_eager=True,
     help="Show version and exit.",
@@ -147,7 +199,7 @@ def _configure_logging(verbose: bool = False) -> None:
     help="Enable debug-level logging (equivalent to APM_LOG_LEVEL=DEBUG).",
 )
 @click.pass_context
-def cli(ctx, verbose: bool) -> None:
+def cli(ctx: click.Context, verbose: bool) -> None:
     """Main entry point for the APM CLI."""
     ctx.ensure_object(dict)
     ctx.obj["verbose"] = verbose
@@ -160,7 +212,7 @@ def cli(ctx, verbose: bool) -> None:
     if verbose:
         # Upgrade to DEBUG when the flag is set; env-var path runs in main().
         _configure_logging(verbose=True)
-    log_tls_trust_status()
+    _log_command_tls_status()
 
     # Suppress only the agents-target deprecation warning so CLI users see
     # the formatted logger.warning() in the install phase, not a double print.
@@ -185,51 +237,13 @@ def cli(ctx, verbose: bool) -> None:
         _check_and_notify_updates()
 
 
-# Register command groups
-cli.add_command(approve_cmd, name="approve")
-cli.add_command(audit)
-cli.add_command(cache)
-cli.add_command(deny_cmd, name="deny")
-cli.add_command(deps)
-cli.add_command(view_cmd)
-# Hidden backward-compatible alias: ``apm info`` → ``apm view``
-cli.add_command(
-    click.Command(
-        name="info",
-        callback=view_cmd.callback,
-        params=list(view_cmd.params),
-        help=view_cmd.help,
-        hidden=True,
-    )
-)
-cli.add_command(pack_cmd, name="pack")
-cli.add_command(unpack_cmd, name="unpack")
-cli.add_command(publish_cmd, name="publish")
-cli.add_command(init)
-cli.add_command(discover)
-cli.add_command(install)
-cli.add_command(lock)
-cli.add_command(uninstall)
-cli.add_command(prune)
-cli.add_command(update)
-cli.add_command(self_update)
-cli.add_command(plugin_cmd, name="plugin")
-cli.add_command(compile_cmd, name="compile")
-cli.add_command(run)
-cli.add_command(preview)
-cli.add_command(list_cmd, name="list")
-cli.add_command(config)
-cli.add_command(experimental)
-cli.add_command(runtime)
-cli.add_command(targets)
-cli.add_command(mcp)
-cli.add_command(policy)
-cli.add_command(outdated_cmd, name="outdated")
-cli.add_command(doctor)
-cli.add_command(lifecycle)
-cli.add_command(marketplace)
-cli.add_command(find_cmd)
-cli.add_command(marketplace_search, name="search")
+def _legacy_cli_colors() -> tuple[str, str, str]:
+    """Return legacy fallback colors without importing command helpers."""
+    from colorama import Fore, Style
+    from colorama import init as colorama_init
+
+    colorama_init(autoreset=True)
+    return Fore.RED + Style.BRIGHT, Fore.YELLOW, Style.RESET_ALL
 
 
 def _get_current_code_page() -> "Optional[int]":
@@ -309,12 +323,13 @@ def _warn_encoding_issue(failed_cp: int) -> None:
         failed_cp: The code page that failed to switch from.
     """
     encoding_name = _code_page_to_encoding_name(failed_cp)
+    _, warning, reset = _legacy_cli_colors()
     click.echo(
-        f"\n{WARNING}Warning: Console is {encoding_name}, UTF-8 switch failed.{RESET}\n",
+        f"\n{warning}Warning: Console is {encoding_name}, UTF-8 switch failed.{reset}\n",
         err=True,
     )
     click.echo(
-        f"{WARNING}Display issues may occur. Suggestions:{RESET}",
+        f"{warning}Display issues may occur. Suggestions:{reset}",
         err=True,
     )
     click.echo("  - Run: chcp 65001  (if available)", err=True)
@@ -363,15 +378,15 @@ def _configure_encoding() -> None:
             _warn_encoding_issue(current_cp)
 
 
-def main():
+def main() -> None:
     """Main entry point for the CLI."""
     _configure_logging()  # honours APM_LOG_LEVEL env var; --verbose upgrades in cli()
     _configure_encoding()
-    configure_process_tls_trust()
     try:
         cli(obj={})
     except Exception as e:
-        click.echo(f"{ERROR}Error: {e}{RESET}", err=True)
+        error, _, reset = _legacy_cli_colors()
+        click.echo(f"{error}Error: {e}{reset}", err=True)
         sys.exit(1)
 
 

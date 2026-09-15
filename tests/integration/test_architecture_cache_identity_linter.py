@@ -269,9 +269,13 @@ MUTATIONS: Mapping[str, Mutation] = {
         apply=lambda root: _rewrite(
             root,
             TIERED_RESOLVER,
-            "    def try_resolve(self, dep_ref: DependencyReference, ref: str) -> str | None:\n"
+            "    def try_resolve("
+            "self, dep_ref: DependencyReference, ref: str"
+            ") -> RefResolution | None:\n"
             "        return self.cache.get(_repository_cache_identity(dep_ref), ref)\n",
-            "    def lookup(self, dep_ref: DependencyReference, ref: str) -> str | None:\n"
+            "    def lookup("
+            "self, dep_ref: DependencyReference, ref: str"
+            ") -> RefResolution | None:\n"
             "        return self.cache.get(_repository_cache_identity(dep_ref), ref)\n",
         ),
         expected="L0PerRunCache.try_resolve is missing",
@@ -308,11 +312,11 @@ MUTATIONS: Mapping[str, Mutation] = {
         apply=lambda root: _rewrite(
             root,
             TIERED_RESOLVER,
-            "    def _dispatch(self, dep_ref: DependencyReference, ref: str) -> str | None:\n",
+            "    def _dispatch(self, dep_ref: DependencyReference, ref: str) -> RefResolution | None:\n",
             "    def resolve(self, repo_ref):\n"
             "        return repo_ref\n"
             "\n"
-            "    def _dispatch(self, dep_ref: DependencyReference, ref: str) -> str | None:\n",
+            "    def _dispatch(self, dep_ref: DependencyReference, ref: str) -> RefResolution | None:\n",
         ),
         expected="TieredRefResolver.resolve has duplicate definitions",
     ),
@@ -321,8 +325,8 @@ MUTATIONS: Mapping[str, Mutation] = {
         apply=lambda root: _rewrite(
             root,
             TIERED_RESOLVER,
-            "    def seed(self, repo_ref: str | DependencyReference, ref: str, sha: str) -> bool:\n",
-            "    def prime(self, repo_ref: str | DependencyReference, ref: str, sha: str) -> bool:\n",
+            "    def seed(\n",
+            "    def prime(\n",
         ),
         expected="TieredRefResolver.seed is missing",
     ),
@@ -330,8 +334,8 @@ MUTATIONS: Mapping[str, Mutation] = {
         apply=lambda root: _rewrite(
             root,
             TIERED_RESOLVER,
-            "        self._cache.put(_repository_cache_identity(dep_ref), ref, sha.lower())\n",
-            "        self._cache.put(dep_ref.repo_url, ref, sha.lower())\n",
+            "            _repository_cache_identity(dep_ref),\n",
+            "            dep_ref.repo_url,\n",
         ),
         expected="lockfile seed must call _cache.put(",
     ),

@@ -139,6 +139,7 @@ def run_mcp_integration(  # noqa: PLR0913
     target_decision: "EffectiveTargetDecision | None" = None,
     scope=None,
     trusted_transitive_configs: (Mapping[str, tuple[str, Mapping[str, Any]]] | None) = None,
+    lockfile_snapshot=None,
 ) -> tuple[int, dict]:
     """Run MCP server integration after APM package installation.
 
@@ -188,17 +189,17 @@ def run_mcp_integration(  # noqa: PLR0913
             report the violation, and exit non-zero; already-installed APM
             packages are left in place.
     """
-    from apm_cli.deps.lockfile import LockFile
+    from apm_cli.install.lockfile_snapshot import LockfileSnapshot
     from apm_cli.integration.mcp_config_view import CurrentMcpConfigView
     from apm_cli.integration.mcp_integrator import MCPIntegrator
     from apm_cli.policy.install_preflight import run_policy_preflight
 
+    snapshot = LockfileSnapshot.resolve(lock_path, lockfile_snapshot)
     current_view = None
     if should_install and (mcp_deps or apm_modules_path.exists()):
-        lockfile = LockFile.read(lock_path) if lock_path.exists() else None
         current_view = CurrentMcpConfigView.derive(
             apm_package,
-            lockfile,
+            snapshot.lockfile,
             apm_modules_path,
             trust_transitive_self_defined=trust_transitive_mcp,
             diagnostics=diagnostics,
@@ -338,6 +339,7 @@ def run_mcp_integration(  # noqa: PLR0913
             mcp_config_provenance=new_mcp_provenance,
             logger=logger,
             fail_on_write_error=True,
+            lockfile_snapshot=snapshot,
         )
     elif should_install and not mcp_deps:
         # No MCP deps at all -- remove any old APM-managed servers
@@ -373,6 +375,7 @@ def run_mcp_integration(  # noqa: PLR0913
                 mcp_config_provenance={},
                 logger=logger,
                 fail_on_write_error=True,
+                lockfile_snapshot=snapshot,
             )
         logger.verbose_detail("No MCP dependencies found in apm.yml")
     elif not should_install and old_mcp_servers:
@@ -386,6 +389,7 @@ def run_mcp_integration(  # noqa: PLR0913
             mcp_config_provenance=old_mcp_provenance,
             logger=logger,
             fail_on_write_error=True,
+            lockfile_snapshot=snapshot,
         )
 
     return mcp_count, mcp_apm_config

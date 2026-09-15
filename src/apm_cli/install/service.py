@@ -104,7 +104,7 @@ class InstallService:
     integrator factory) when programmatic callers need to swap them.
     """
 
-    def run(self, request: InstallRequest) -> InstallResult:
+    def run(self, request: InstallRequest, *, lockfile_snapshot=None) -> InstallResult:
         """Execute the install pipeline and return the structured result.
 
         Fires ``pre-install`` / ``post-install`` lifecycle scripts around
@@ -164,6 +164,7 @@ class InstallService:
             lockfile_only=request.lockfile_only,
             trust_bin=request.trust_bin,
             transaction=request.transaction,
+            lockfile_snapshot=lockfile_snapshot,
         )
 
         if result.disposition in {

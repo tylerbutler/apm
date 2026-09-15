@@ -2,7 +2,6 @@
 
 from pathlib import Path
 
-from apm_cli.cli import cli
 from scripts.check_cli_docs import DEFAULT_DIST, recovery_guidance, registry_docs_mismatches
 
 REPO_ROOT = Path(__file__).parents[2]
@@ -19,7 +18,7 @@ def _render_page(dist: Path, name: str) -> None:
 def _public_command_names(dist: Path) -> set[str]:
     cli_dir = dist / "reference" / "cli"
     cli_dir.mkdir(parents=True, exist_ok=True)
-    missing, orphan = registry_docs_mismatches(cli, dist)
+    missing, orphan = registry_docs_mismatches(dist)
     assert orphan == []
     return set(missing)
 
@@ -45,7 +44,7 @@ def test_hidden_alias_does_not_require_rendered_page(tmp_path: Path) -> None:
     """The hidden info alias must not create a second documentation contract."""
     public = _render_public_pages(tmp_path)
 
-    missing_pages, orphan_pages = registry_docs_mismatches(cli, tmp_path)
+    missing_pages, orphan_pages = registry_docs_mismatches(tmp_path)
 
     assert "info" not in public
     assert missing_pages == []
@@ -59,7 +58,7 @@ def test_nested_subcommands_share_the_top_level_group_page(tmp_path: Path) -> No
     nested.parent.mkdir(parents=True)
     nested.write_text("<p>nested</p>\n", encoding="utf-8")
 
-    missing_pages, orphan_pages = registry_docs_mismatches(cli, tmp_path)
+    missing_pages, orphan_pages = registry_docs_mismatches(tmp_path)
 
     assert missing_pages == []
     assert orphan_pages == []
@@ -69,7 +68,7 @@ def test_registered_command_without_rendered_page_fails(tmp_path: Path) -> None:
     """Removing one rendered page must identify its executable command."""
     public = _render_public_pages(tmp_path, omit={"doctor"})
 
-    missing_pages, orphan_pages = registry_docs_mismatches(cli, tmp_path)
+    missing_pages, orphan_pages = registry_docs_mismatches(tmp_path)
 
     assert "doctor" in public
     assert missing_pages == ["doctor"]
@@ -81,7 +80,7 @@ def test_rendered_page_without_registered_command_fails(tmp_path: Path) -> None:
     _render_public_pages(tmp_path)
     _render_page(tmp_path, "not-a-command")
 
-    missing_pages, orphan_pages = registry_docs_mismatches(cli, tmp_path)
+    missing_pages, orphan_pages = registry_docs_mismatches(tmp_path)
 
     assert missing_pages == []
     assert orphan_pages == ["not-a-command"]

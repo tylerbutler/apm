@@ -141,6 +141,13 @@
       "guards": ["transport-platform-ref-freshness"]
     },
     {
+      "id": "targeted-remote-ref-resolution",
+      "decision": "Authenticated, transport-aware exact Git branch and tag resolution",
+      "owner": "deps/git_reference_resolver.py (GitReferenceResolver.resolve_remote_ref)",
+      "selectors": ["src/apm_cli/deps/git_reference_resolver.py"],
+      "guards": ["transport-platform-targeted-remote-ref-resolution"]
+    },
+    {
       "id": "revision-pin-update-outcome",
       "decision": "Revision-pin update outcome (updates vs retained SHA pins)",
       "owner": "deps/revision_pins.py (RevisionPinResolutionResult)",

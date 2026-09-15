@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 from apm_cli.install.deployed_paths import deployed_path_entry
 from apm_cli.install.services import enforce_agent_plugin_deployment_boundary
 from apm_cli.integration.base_integrator import BaseIntegrator
+from apm_cli.integration.skill_ownership import SkillOwnershipIndex
 from apm_cli.integration.skill_package_routing import (
     get_effective_type,
 )
@@ -386,10 +387,23 @@ class SkillIntegrator(BaseIntegrator):
     - references/ subdirectory for prompt files
     """
 
-    def __init__(self) -> None:
-        # Only successful writes establish same-run ownership, keyed by the
-        # actual destination rather than a basename shared by several targets.
-        self._native_skill_session_owners: dict[Path, str | None] = {}
+    def __init__(self, ownership_index: SkillOwnershipIndex | None = None) -> None:
+        self._ownership_index = ownership_index
+        self._ownership_project_root: Path | None = None
+
+    def _ownership_index_for(self, project_root: Path) -> SkillOwnershipIndex:
+        """Return the injected index or lazily load one for standalone callers."""
+        if self._ownership_index is None or (
+            self._ownership_project_root is not None
+            and self._ownership_project_root != project_root
+        ):
+            leaf_owners, deployed_skill_owners = self._build_ownership_maps(project_root)
+            self._ownership_index = SkillOwnershipIndex.from_ownership_maps(
+                leaf_owners,
+                deployed_skill_owners,
+            )
+            self._ownership_project_root = project_root
+        return self._ownership_index
 
     @staticmethod
     def _target_skills_root(target: TargetProfile, project_root: Path) -> Path:
@@ -718,7 +732,7 @@ class SkillIntegrator(BaseIntegrator):
                 pass
 
     @staticmethod
-    def _promote_sub_skills(
+    def _promote_sub_skills(  # noqa: PLR0913
         sub_skills_dir: Path,
         target_skills_root: Path,
         parent_name: str,
@@ -726,6 +740,7 @@ class SkillIntegrator(BaseIntegrator):
         warn: bool = True,
         skip_bin: bool = False,
         owned_by: dict[str, str] | None = None,
+        ownership_index: SkillOwnershipIndex | None = None,
         diagnostics=None,
         managed_files=None,
         force: bool = False,
@@ -745,6 +760,8 @@ class SkillIntegrator(BaseIntegrator):
             warn: Whether to emit a warning on name collisions.
             owned_by: Map of skill_name -> owner_package_name from the lockfile.
                 When provided, warnings are suppressed for self-overwrites.
+            ownership_index: Canonical run-scoped owner for lockfile and
+                same-run ownership lookups and claims.
             diagnostics: Optional DiagnosticCollector for deferred warning output.
             project_root: Project root for computing relative diagnostic paths.
             source_paths: Explicit name -> source directory map. Plugins resolve
@@ -792,6 +809,8 @@ class SkillIntegrator(BaseIntegrator):
             if target.exists():
                 # Content-identical: skip entirely (no copy, no warning)
                 if SkillIntegrator.is_skill_dir_identical_to_source(sub_skill_path, target):
+                    if ownership_index is not None:
+                        ownership_index.claim(rel_path, parent_name)
                     promoted += 1
                     deployed.append(target)
                     continue
@@ -800,7 +819,11 @@ class SkillIntegrator(BaseIntegrator):
                 is_managed = (
                     managed_files is not None and rel_path.replace("\\", "/") in managed_files
                 )
-                prev_owner = (owned_by or {}).get(sub_name)
+                prev_owner = (
+                    ownership_index.owner_for_leaf(sub_name)
+                    if ownership_index is not None
+                    else (owned_by or {}).get(sub_name)
+                )
                 is_self_overwrite = prev_owner is not None and prev_owner == parent_name
 
                 if managed_files is not None and not is_managed and not is_self_overwrite:
@@ -858,40 +881,21 @@ class SkillIntegrator(BaseIntegrator):
             )
             if link_rewriter is not None:
                 link_rewriter._resolve_markdown_links_in_skill_bundle(sub_skill_path, target)
+            if ownership_index is not None:
+                ownership_index.claim(rel_path, parent_name)
             promoted += 1
             deployed.append(target)
         return promoted, deployed
 
     @staticmethod
-    def _build_ownership_maps(project_root: Path) -> tuple[dict[str, str], dict[str, str]]:
-        """Read sub-skill name and native-skill destination ownership once.
-
-        Both maps store full dependency identities, never ambiguous basenames.
-        Native ownership includes only ``/skills/`` paths, so unrelated
-        artifacts or another target's same-named skill cannot confer ownership.
-        """
-        from apm_cli.deps.lockfile import LockFile, get_lockfile_path
-
-        owned_by: dict[str, str] = {}
-        native_owners: dict[str, str] = {}
-        lockfile = LockFile.read(get_lockfile_path(project_root))
-        if not lockfile:
-            return owned_by, native_owners
-        for dep in lockfile.get_package_dependencies():
-            unique_key = dep.get_unique_key()
-            for deployed_path in dep.deployed_files:
-                normalized = deployed_path.rstrip("/").replace("\\", "/")
-                skill_name = normalized.rsplit("/", 1)[-1]
-                # Both maps cover all paths for sub-skill self-overwrite tracking.
-                owned_by[skill_name] = unique_key
-                # Native-owner map is scoped to skill paths only to avoid false
-                # attribution from prompts/hooks/commands that share a leaf name.
-                if "/skills/" in normalized:
-                    native_owners[normalized] = unique_key
-        return owned_by, native_owners
+    def _build_ownership_maps(
+        project_root: Path,
+    ) -> tuple[dict[str, str | None], dict[str, str | None]]:
+        """Return compatibility ownership maps through the canonical owner."""
+        return SkillOwnershipIndex.load(project_root).ownership_maps()
 
     @staticmethod
-    def _build_skill_ownership_map(project_root: Path) -> dict[str, str]:
+    def _build_skill_ownership_map(project_root: Path) -> dict[str, str | None]:
         """Build a map of skill_name -> owner_package_name from the lockfile.
 
         Used to distinguish self-overwrites (no warning) from cross-package
@@ -901,7 +905,7 @@ class SkillIntegrator(BaseIntegrator):
         return owned_by
 
     @staticmethod
-    def _build_native_skill_owner_map(project_root: Path) -> dict[str, str]:
+    def _build_native_skill_owner_map(project_root: Path) -> dict[str, str | None]:
         """Build a map of skill_name -> dep.get_unique_key() from the lockfile.
 
         Scoped to ``/skills/`` paths only -- see ``_build_ownership_maps`` for details.
@@ -954,7 +958,7 @@ class SkillIntegrator(BaseIntegrator):
         # _build_ownership_maps).
         _dep_ref = getattr(package_info, "dependency_ref", None)
         parent_name = _dep_ref.get_unique_key() if _dep_ref is not None else package_path.name
-        owned_by = self._build_skill_ownership_map(project_root)
+        ownership_index = self._ownership_index_for(project_root)
         name_filter = (
             source_plan.selected_skill_names
             if source_plan is not None
@@ -992,7 +996,7 @@ class SkillIntegrator(BaseIntegrator):
                 target_skills_root,
                 parent_name,
                 warn=is_primary,
-                owned_by=owned_by if is_primary else None,
+                ownership_index=ownership_index,
                 diagnostics=diagnostics if is_primary else None,
                 managed_files=managed_files if is_primary else None,
                 force=force,
@@ -1104,11 +1108,10 @@ class SkillIntegrator(BaseIntegrator):
         all_target_paths: list[Path] = []
         primary_skill_md: Path | None = None
 
-        # Read lockfile once and derive both maps in a single pass.
-        owned_by, lockfile_native_owners = self._build_ownership_maps(project_root)
+        ownership_index = self._ownership_index_for(project_root)
         # Install supplies the pre-normalized set; do not rescan it per package.
         collision_managed = (
-            managed_files if managed_files is not None else set(lockfile_native_owners)
+            managed_files if managed_files is not None else ownership_index.deployed_skill_paths()
         )
         sub_skills_dir = package_path / ".apm" / "skills"
 
@@ -1154,12 +1157,12 @@ class SkillIntegrator(BaseIntegrator):
                 continue
             seen_skill_dirs.add(resolved)
 
-            rel_path = deployed_path_entry(target_skill_dir, project_root, [target])
-            session_owned = resolved in self._native_skill_session_owners
+            ownership_path = deployed_path_entry(target_skill_dir, project_root, [target])
+            session_owned = ownership_index.owns_deployed_skill_path(ownership_path)
             if self.check_collision(
                 target_skill_dir,
-                rel_path,
-                {rel_path} if session_owned else collision_managed,
+                ownership_path,
+                {ownership_path} if session_owned else collision_managed,
                 force,
                 diagnostics=diagnostics,
             ):
@@ -1172,12 +1175,7 @@ class SkillIntegrator(BaseIntegrator):
 
             if target_skill_dir.exists():
                 if is_primary:
-                    # Check both the lockfile (previous runs) and the in-memory session
-                    # map (current run) so that same-manifest collisions are caught even
-                    # before the lockfile has been written for this run.
-                    prev_owner = lockfile_native_owners.get(
-                        rel_path
-                    ) or self._native_skill_session_owners.get(resolved)
+                    prev_owner = ownership_index.owner_for_deployed_skill_path(ownership_path)
                     is_self_overwrite = prev_owner is not None and prev_owner == current_key
                     if prev_owner is not None and not is_self_overwrite:
                         try:
@@ -1188,7 +1186,7 @@ class SkillIntegrator(BaseIntegrator):
                             # Dynamic-root targets (cowork): directory is
                             # outside the project tree.
                             rel_prefix = "skills"
-                        rel_path = f"{rel_prefix}/{skill_name}"
+                        diagnostic_path = f"{rel_prefix}/{skill_name}"
                         # Issue 1: package= should identify the package causing the
                         # collision (current_key), not the skill name, so render_summary()
                         # groups diagnostics by the package responsible.
@@ -1199,7 +1197,7 @@ class SkillIntegrator(BaseIntegrator):
                         )
                         if diagnostics is not None:
                             diagnostics.overwrite(
-                                path=rel_path,
+                                path=diagnostic_path,
                                 package=current_key or skill_name,
                                 detail=detail,
                             )
@@ -1227,7 +1225,7 @@ class SkillIntegrator(BaseIntegrator):
             )
             self._resolve_markdown_links_in_skill_bundle(package_path, target_skill_dir)
             all_target_paths.append(target_skill_dir)
-            self._native_skill_session_owners[resolved] = current_key
+            ownership_index.claim(ownership_path, current_key)
 
             if is_primary:
                 files_copied = sum(1 for _ in target_skill_dir.rglob("*") if _.is_file())
@@ -1241,7 +1239,7 @@ class SkillIntegrator(BaseIntegrator):
                 target_skills_root,
                 current_key or skill_name,
                 warn=is_primary,
-                owned_by=owned_by if is_primary else None,
+                ownership_index=ownership_index,
                 diagnostics=diagnostics if is_primary else None,
                 managed_files=managed_files if is_primary else None,
                 force=force,
@@ -1321,7 +1319,7 @@ class SkillIntegrator(BaseIntegrator):
         parent_name = (
             _dep_ref.get_unique_key() if _dep_ref is not None else package_info.install_path.name
         )
-        owned_by, lockfile_native_owners = self._build_ownership_maps(project_root)  # noqa: RUF059
+        ownership_index = self._ownership_index_for(project_root)
 
         total_promoted = 0
         all_deployed: list[Path] = []
@@ -1369,7 +1367,7 @@ class SkillIntegrator(BaseIntegrator):
                 target_skills_root,
                 parent_name,
                 warn=is_primary,
-                owned_by=owned_by if is_primary else None,
+                ownership_index=ownership_index,
                 diagnostics=diagnostics if is_primary else None,
                 managed_files=managed_files if is_primary else None,
                 force=force,
@@ -2091,6 +2089,7 @@ class SkillIntegrator(BaseIntegrator):
             skills_dir,
             installed_skill_names,
             project_root=project_root,
+            ownership_index=self._ownership_index,
             get_lockfile_owned_agent_skills=self._get_lockfile_owned_agent_skills,
         )
 

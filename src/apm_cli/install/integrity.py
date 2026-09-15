@@ -79,11 +79,17 @@ def enforce_installed_hash_policy(ctx: InstallContext) -> None:
     if policy is None or not require_hashes_enabled(policy.security.integrity):
         return
 
-    from ..deps.lockfile import LockFile, get_lockfile_path
+    from ..deps.lockfile import get_lockfile_path
+    from .lockfile_snapshot import LockfileSnapshot
     from .phases.policy_gate import PolicyViolationError
 
     lockfile_path = get_lockfile_path(ctx.apm_dir)
-    lockfile = LockFile.read(lockfile_path)
+    snapshot = LockfileSnapshot.resolve(
+        lockfile_path,
+        getattr(ctx, "lockfile_snapshot", None),
+    )
+    ctx.lockfile_snapshot = snapshot
+    lockfile = snapshot.lockfile
     if lockfile is None:
         raise PolicyViolationError(
             "security.integrity.require_hashes is enabled but the lockfile at "

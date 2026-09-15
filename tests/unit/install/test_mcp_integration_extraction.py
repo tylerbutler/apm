@@ -106,6 +106,7 @@ class TestRunMcpIntegrationInstallBranch:
             mcp_config_provenance={"io.github.acme/server": "io.github.acme/package"},
             logger=ANY,
             fail_on_write_error=True,
+            lockfile_snapshot=ANY,
         )
         mock_mcp.remove_stale.assert_not_called()
 
@@ -230,6 +231,7 @@ class TestRunMcpIntegrationEmptyDepsBranch:
             mcp_config_provenance={},
             logger=ANY,
             fail_on_write_error=True,
+            lockfile_snapshot=ANY,
         )
 
     @patch(_PATCH_TARGET)
@@ -292,6 +294,7 @@ class TestRunMcpIntegrationRestoreBranch:
             mcp_config_provenance={"io.github.acme/kept": "io.github.acme/pkg"},
             logger=ANY,
             fail_on_write_error=True,
+            lockfile_snapshot=ANY,
         )
         mock_mcp.install.assert_not_called()
         mock_mcp.remove_stale.assert_not_called()

@@ -435,14 +435,8 @@ MUTATIONS: tuple[MutationCase, ...] = (
     MutationCase(
         rule_id="transport-platform-tls-trust-injection",
         path="src/apm_cli/cli.py",
-        old="from apm_cli.core.tls_trust import configure_process_tls_trust, log_tls_trust_status",
-        new=(
-            "import truststore\n"
-            "from apm_cli.core.tls_trust import configure_process_tls_trust,"
-            " log_tls_trust_status\n"
-            "\n"
-            "truststore.inject_into_ssl()"
-        ),
+        old="import click",
+        new=("import click\nimport truststore\n\ntruststore.inject_into_ssl()"),
         intent="The root CLI injects TLS trust outside the two sanctioned modules.",
     ),
 )

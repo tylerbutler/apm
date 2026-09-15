@@ -483,6 +483,7 @@ def run(ctx: InstallContext) -> None:
     from apm_cli.integration.hook_integrator import HookIntegrator
     from apm_cli.integration.instruction_integrator import InstructionIntegrator
     from apm_cli.integration.skill_integrator import SkillIntegrator
+    from apm_cli.integration.skill_ownership import SkillOwnershipIndex
     from apm_cli.integration.targets import (
         resolve_targets as _resolve_targets_legacy,
     )
@@ -578,10 +579,11 @@ def run(ctx: InstallContext) -> None:
     # Initialize integrators
     # ------------------------------------------------------------------
     ctx.targets = _targets
+    ctx.skill_ownership_index = SkillOwnershipIndex.from_lockfile(ctx.existing_lockfile)
     ctx.integrators = {
         "prompt": PromptIntegrator(),
         "agent": AgentIntegrator(),
-        "skill": SkillIntegrator(),
+        "skill": SkillIntegrator(ctx.skill_ownership_index),
         "command": CommandIntegrator(),
         "hook": HookIntegrator(),
         "instruction": InstructionIntegrator(),

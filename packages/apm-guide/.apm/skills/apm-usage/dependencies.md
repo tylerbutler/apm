@@ -620,7 +620,10 @@ and original constraint are pinned in the lockfile. Subsequent
 `apm install` runs replay the lockfile without network. Use
 `apm update` (or change the manifest constraint) to re-resolve against
 current remote tags. Update-like commands require authenticated upstream
-truth and do not accept a stale persistent bare-cache ref. Tag patterns are tried in order:
+truth and do not accept a stale persistent bare-cache ref. When the commits
+API cannot establish a named ref's type, APM queries only the exact remote
+branch, tag, and peeled annotated-tag refs before using the compatibility clone path.
+Tag patterns are tried in order:
 `v{version}`, `{name}--v{version}`, and `{name}-v{version}`, then a bare
 `{version}` fallback. For virtual subdirectory deps, `{name}` is the
 final path segment (for example `pkg-a` in `acme/mono/packages/pkg-a`). A

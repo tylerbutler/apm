@@ -151,6 +151,16 @@ _BOOTSTRAP_OWNED_DEFS: tuple[str, ...] = (
 
 _RESOLVER_ALT = r"_?resolve_bootstrap_project_name"
 
+_CLI_COMMAND_REGISTRY = "src/apm_cli/commands/registry.py"
+
+_ROOT_CLI = "src/apm_cli/cli.py"
+
+_COMMANDS_INIT = "src/apm_cli/commands/__init__.py"
+
+_DEPS_INIT = "src/apm_cli/commands/deps/__init__.py"
+
+_CLI_DOCS_CHECKER = "scripts/check_cli_docs.py"
+
 
 def _count_fixed_lines(facts: FileFacts, needle: str) -> int:
     """Count lexical lines containing `needle` (mirrors ``grep -Fc``)."""
@@ -647,6 +657,90 @@ def _has_named_assignment(
     )
 
 
+def _check_cli_command_registry(provider: FactsProvider) -> Iterable[Violation]:
+    """Keep root discovery and docs parity on one static registry."""
+    rule_id = "contracts-tooling-cli-command-registry"
+    paths = (
+        _CLI_COMMAND_REGISTRY,
+        _ROOT_CLI,
+        _COMMANDS_INIT,
+        _DEPS_INIT,
+        _CLI_DOCS_CHECKER,
+    )
+    facts_by_path, failures = _read_required(provider, rule_id, paths)
+    if failures:
+        return failures
+    registry = source_text(facts_by_path[_CLI_COMMAND_REGISTRY])
+    cli = source_text(facts_by_path[_ROOT_CLI])
+    commands_init = source_text(facts_by_path[_COMMANDS_INIT])
+    deps_init = source_text(facts_by_path[_DEPS_INIT])
+    docs_checker = source_text(facts_by_path[_CLI_DOCS_CHECKER])
+    findings: list[Violation] = []
+
+    if len(re.findall(r"^COMMAND_SPECS\s*:", registry, re.MULTILINE)) != 1:
+        findings.append(
+            violation(
+                rule_id,
+                _CLI_COMMAND_REGISTRY,
+                "commands/registry.py must define COMMAND_SPECS exactly once",
+            )
+        )
+    required_cli = (
+        "from apm_cli.commands.registry import",
+        "class _LazyCommandGroup",
+        "def list_commands(",
+        "def get_command(",
+        "def format_commands(",
+    )
+    missing_cli = tuple(item for item in required_cli if item not in cli)
+    eager_imports = tuple(
+        module
+        for module in re.findall(
+            r"^from apm_cli\.commands\.([A-Za-z0-9_.]+) import",
+            cli,
+            re.MULTILINE,
+        )
+        if module != "registry"
+    )
+    if missing_cli or eager_imports or "cli.add_command(" in cli:
+        findings.append(
+            violation(
+                rule_id,
+                _ROOT_CLI,
+                "root CLI must resolve commands only through commands/registry.py",
+            )
+        )
+    if "from ." in commands_init or "import_module(" in commands_init:
+        findings.append(
+            violation(
+                rule_id,
+                _COMMANDS_INIT,
+                "commands package initialization must not import command modules",
+            )
+        )
+    if "def __getattr__(" not in deps_init or "from .cli import" in deps_init:
+        findings.append(
+            violation(
+                rule_id,
+                _DEPS_INIT,
+                "commands.deps compatibility exports must remain lazy",
+            )
+        )
+    if (
+        "from apm_cli.commands.registry import public_command_names" not in docs_checker
+        or "group.commands" in docs_checker
+        or "from apm_cli.cli import cli" in docs_checker
+    ):
+        findings.append(
+            violation(
+                rule_id,
+                _CLI_DOCS_CHECKER,
+                "CLI docs parity must consume the canonical static registry",
+            )
+        )
+    return findings
+
+
 RULES: tuple[Rule, ...] = (
     Rule(
         id="registry_delegation.runtime_descriptors",
@@ -689,6 +783,13 @@ RULES: tuple[Rule, ...] = (
         guard_ids=("registry-delegation-bootstrap-project-name",),
         description="Bootstrap project names must route through core/project_name.py.",
         check=_check_bootstrap_project_name,
+    ),
+    Rule(
+        id="contracts-tooling-cli-command-registry",
+        group=GROUP,
+        guard_ids=("contracts-tooling-cli-command-registry",),
+        description="Top-level CLI discovery and docs parity share one static registry.",
+        check=_check_cli_command_registry,
     ),
 )
 

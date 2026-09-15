@@ -100,6 +100,14 @@ MUTATIONS: tuple[MutationCase, ...] = (
         intent="Policy cache serializer stops routing through the canonical shape helper.",
     ),
     MutationCase(
+        guard_id="contracts-tooling-cli-command-registry",
+        rule_id="contracts-tooling-cli-command-registry",
+        path="src/apm_cli/commands/registry.py",
+        old="COMMAND_SPECS: tuple[CommandSpec, ...] = (",
+        new="_LOCAL_COMMAND_SPECS: tuple[CommandSpec, ...] = (",
+        intent="The static command vocabulary stops using its canonical registry binding.",
+    ),
+    MutationCase(
         guard_id="contracts-tooling-compile-inventory",
         rule_id="registry_delegation.compile_inventory_authority",
         path="src/apm_cli/compilation/inventory.py",
@@ -138,6 +146,14 @@ MUTATIONS: tuple[MutationCase, ...] = (
         old="def build_generation_footer(",
         new="def build_generation_footer_v2(",
         intent="Generated footer owner loses the one canonical builder definition.",
+    ),
+    MutationCase(
+        guard_id="contracts-tooling-governance-evidence",
+        rule_id="contracts-tooling-governance-evidence",
+        path="scripts/governance/authority.cjs",
+        old="authorizes_implementation: false",
+        new="authorizes_implementation: true",
+        intent="Governance evidence incorrectly grants automated implementation permission.",
     ),
     MutationCase(
         guard_id="contracts-tooling-lockfile-read",
@@ -438,6 +454,22 @@ MUTATIONS: tuple[MutationCase, ...] = (
         intent="Resolution staging owner drops a mandatory replacement-activation method.",
     ),
     MutationCase(
+        guard_id="install-deployment-run-scoped-lockfile-snapshot",
+        rule_id="install-deployment-run-scoped-lockfile-snapshot",
+        path="src/apm_cli/install/lockfile_snapshot.py",
+        old="    def resolve(",
+        new="    def resolve_disabled(",
+        intent="Install orchestration loses the canonical supplied-or-loaded snapshot resolver.",
+    ),
+    MutationCase(
+        guard_id="install-deployment-skill-ownership-index",
+        rule_id="install-deployment-skill-ownership-index",
+        path="src/apm_cli/integration/skill_ownership.py",
+        old="    def from_lockfile(",
+        new="    def from_lockfile_disabled(",
+        intent="Skill ownership loses its canonical lockfile-derived index constructor.",
+    ),
+    MutationCase(
         guard_id="install-deployment-source-plan",
         rule_id="install-deployment-source-plan",
         path="src/apm_cli/install/services.py",
@@ -591,6 +623,14 @@ MUTATIONS: tuple[MutationCase, ...] = (
         old="return _read_plugin_json_version(package_root)",
         new="return (None, 'disabled')",
         intent="Local marketplace version precedence skips the plugin.json fallback read.",
+    ),
+    MutationCase(
+        guard_id="onboarding-metadata-only",
+        rule_id="onboarding-metadata-only",
+        path="src/apm_cli/adopt/manifest_edit.py",
+        old="    write_yaml_text_atomic(path, content)",
+        new="    path.write_text(content)",
+        intent="Onboarding bypasses the sole atomic consumer-manifest writer.",
     ),
     MutationCase(
         guard_id="registry-delegation-bootstrap-project-name",
@@ -1028,6 +1068,14 @@ MUTATIONS: tuple[MutationCase, ...] = (
         old="            return _repair(env)\n",
         new="            return True\n",
         intent="Downloader skips the dangling-cone-symlink repair owner.",
+    ),
+    MutationCase(
+        guard_id="transport-platform-targeted-remote-ref-resolution",
+        rule_id="transport-platform-targeted-remote-ref-resolution",
+        path="src/apm_cli/deps/git_reference_resolver.py",
+        old='peeled_tag_ref = f"refs/tags/{ref}^{{}}"',
+        new="peeled_tag_ref = tag_ref",
+        intent="Exact remote lookup stops requesting the peeled annotated-tag commit.",
     ),
     MutationCase(
         guard_id="transport-platform-unix-install-ownership",

@@ -14,7 +14,7 @@ focus is on:
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 from unittest.mock import patch as _patch
 
 import click
@@ -424,7 +424,11 @@ class TestUpdateAssumeYes:
             manifest_text = manifest.read_text(encoding="utf-8")
             assert f"org/no-release#{retained_sha}" in manifest_text
             assert f"org/released#{new_sha} # v2.0.0" in manifest_text
-            annotate.assert_called_once_with(Path.cwd(), (update,))
+            annotate.assert_called_once_with(
+                Path.cwd(),
+                (update,),
+                lockfile_snapshot=ANY,
+            )
 
     def test_revision_pin_decline_keeps_manifest_unchanged(self, runner, tmp_path):
         old_sha = "a" * 40

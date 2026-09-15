@@ -22,9 +22,11 @@ from apm_cli.deps.tiered_ref_resolver import (
     L0PerRunCache,
     L1CommitsAPI,
     L2BareRevParse,
+    L2RemoteRef,
     L3LegacyClone,
     PerRunRefCache,
     RefFreshnessPolicy,
+    RefResolution,
     TieredRefResolver,
     _repository_cache_identity,
     build_tiered_ref_resolver,
@@ -40,6 +42,19 @@ SHA_C = "c" * 40
 
 def _dep(repo: str = "owner/repo", ref: str = "main") -> DependencyReference:
     return DependencyReference(repo_url=repo, reference=ref)
+
+
+def _resolution(
+    sha: str = SHA_A,
+    *,
+    ref_type: GitReferenceType = GitReferenceType.BRANCH,
+    ref_name: str = "main",
+) -> RefResolution:
+    return RefResolution(
+        ref_type=ref_type,
+        resolved_commit=sha,
+        ref_name=ref_name,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -99,16 +114,18 @@ def test_is_tiered_resolver_enabled(value, expected, monkeypatch):
 def test_per_run_cache_roundtrip():
     cache = PerRunRefCache()
     assert cache.get("owner/repo", "main") is None
-    cache.put("owner/repo", "main", SHA_A)
-    assert cache.get("owner/repo", "main") == SHA_A
+    resolution = _resolution()
+    cache.put("owner/repo", "main", resolution)
+    assert cache.get("owner/repo", "main") == resolution
     assert cache.size() == 1
 
 
 def test_l0_per_run_cache_tier_hits_cache():
     cache = PerRunRefCache()
-    cache.put(_repository_cache_identity(_dep()), "main", SHA_A)
+    resolution = _resolution()
+    cache.put(_repository_cache_identity(_dep()), "main", resolution)
     tier = L0PerRunCache(cache=cache)
-    assert tier.try_resolve(_dep(), "main") == SHA_A
+    assert tier.try_resolve(_dep(), "main") == resolution
 
 
 def test_l0_per_run_cache_keeps_same_path_on_different_hosts_separate():
@@ -123,7 +140,7 @@ def test_l0_per_run_cache_keeps_same_path_on_different_hosts_separate():
         host="gitlab.com",
         reference="main",
     )
-    cache.put(_repository_cache_identity(github_dep), "main", SHA_A)
+    cache.put(_repository_cache_identity(github_dep), "main", _resolution())
     tier = L0PerRunCache(cache=cache)
 
     assert tier.try_resolve(gitlab_dep, "main") is None
@@ -142,7 +159,10 @@ def test_l0_per_run_cache_tier_misses_when_cold():
 def test_l1_returns_sha_directly_when_ref_is_already_a_sha():
     host = MagicMock()
     tier = L1CommitsAPI(host=host)
-    assert tier.try_resolve(_dep(ref=SHA_A), SHA_A) == SHA_A
+    assert tier.try_resolve(_dep(ref=SHA_A), SHA_A) == _resolution(
+        ref_type=GitReferenceType.COMMIT,
+        ref_name=SHA_A,
+    )
 
 
 def test_l1_delegates_to_legacy_resolve_commit_sha_for_ref():
@@ -151,7 +171,34 @@ def test_l1_delegates_to_legacy_resolve_commit_sha_for_ref():
     host = MagicMock()
     host._refs = legacy
     tier = L1CommitsAPI(host=host)
-    assert tier.try_resolve(_dep(), "main") == SHA_B
+    assert tier.try_resolve(_dep(), "main") == _resolution(SHA_B)
+    legacy.resolve_commit_sha_for_ref.assert_called_once()
+
+
+def test_l1_preserves_syntactic_tag_type():
+    legacy = MagicMock()
+    legacy.resolve_commit_sha_for_ref.return_value = SHA_B
+    host = MagicMock()
+    host._refs = legacy
+    tier = L1CommitsAPI(host=host)
+
+    result = tier.try_resolve(_dep(ref="v1.2.3"), "v1.2.3")
+
+    assert result == _resolution(
+        SHA_B,
+        ref_type=GitReferenceType.TAG,
+        ref_name="v1.2.3",
+    )
+
+
+def test_l1_current_remote_defers_named_ref_type_to_exact_lookup():
+    legacy = MagicMock()
+    legacy.resolve_commit_sha_for_ref.return_value = SHA_B
+    host = MagicMock()
+    host._refs = legacy
+    tier = L1CommitsAPI(host=host, allow_syntax_type_hint=False)
+
+    assert tier.try_resolve(_dep(ref="release"), "release") is None
     legacy.resolve_commit_sha_for_ref.assert_called_once()
 
 
@@ -201,7 +248,10 @@ def test_l2_returns_none_when_bare_dir_missing(tmp_path):
 def test_l2_short_circuits_on_sha_input():
     fake_cache = types.SimpleNamespace(_db_root=None)
     tier = L2BareRevParse(git_cache=fake_cache)
-    assert tier.try_resolve(_dep(ref=SHA_A), SHA_A) == SHA_A
+    assert tier.try_resolve(_dep(ref=SHA_A), SHA_A) == _resolution(
+        ref_type=GitReferenceType.COMMIT,
+        ref_name=SHA_A,
+    )
 
 
 @pytest.mark.parametrize(
@@ -221,11 +271,56 @@ def test_l2_rev_parse_uses_git_cache_repository_identity(tmp_path, dependency):
     fake_cache = types.SimpleNamespace(_db_root=tmp_path)
     tier = L2BareRevParse(git_cache=fake_cache)
 
-    with patch.object(L2BareRevParse, "_rev_parse", return_value=SHA_A) as rp:
+    resolution = _resolution()
+    with patch.object(L2BareRevParse, "_rev_parse", return_value=resolution) as rp:
         result = tier.try_resolve(dependency, "main")
 
-    assert result == SHA_A
+    assert result == resolution
     rp.assert_called_once_with(bare, "main")
+
+
+# ---------------------------------------------------------------------------
+# L2 RemoteRef
+# ---------------------------------------------------------------------------
+
+
+def test_l2_remote_ref_preserves_branch_type():
+    resolver = MagicMock()
+    resolver.resolve_remote_ref.return_value = ResolvedReference(
+        original_ref="owner/repo#main",
+        ref_type=GitReferenceType.BRANCH,
+        resolved_commit=SHA_A,
+        ref_name="main",
+    )
+    tier = L2RemoteRef(resolver=resolver)
+
+    assert tier.try_resolve(_dep(), "main") == _resolution()
+    resolver.resolve_remote_ref.assert_called_once_with(_dep(), "main")
+
+
+def test_l2_remote_ref_preserves_tag_type():
+    resolver = MagicMock()
+    resolver.resolve_remote_ref.return_value = ResolvedReference(
+        original_ref="owner/repo#release",
+        ref_type=GitReferenceType.TAG,
+        resolved_commit=SHA_B,
+        ref_name="release",
+    )
+    tier = L2RemoteRef(resolver=resolver)
+
+    assert tier.try_resolve(_dep(ref="release"), "release") == _resolution(
+        SHA_B,
+        ref_type=GitReferenceType.TAG,
+        ref_name="release",
+    )
+
+
+def test_l2_remote_ref_returns_none_for_missing_or_ambiguous_ref():
+    resolver = MagicMock()
+    resolver.resolve_remote_ref.return_value = None
+    tier = L2RemoteRef(resolver=resolver)
+
+    assert tier.try_resolve(_dep(), "main") is None
 
 
 # ---------------------------------------------------------------------------
@@ -242,14 +337,15 @@ def test_l3_returns_sha_from_legacy_resolve():
         ref_name="main",
     )
     tier = L3LegacyClone(legacy_resolver=legacy)
-    assert tier.try_resolve(_dep(), "main") == SHA_C
+    assert tier.try_resolve(_dep(), "main") == _resolution(SHA_C)
 
 
 def test_l3_returns_none_when_legacy_raises():
     legacy = MagicMock()
     legacy.resolve.side_effect = RuntimeError("network down")
     tier = L3LegacyClone(legacy_resolver=legacy)
-    assert tier.try_resolve(_dep(), "main") is None
+    with pytest.raises(RuntimeError, match="network down"):
+        tier.try_resolve(_dep(), "main")
 
 
 def test_l3_resolve_full_passes_through():
@@ -285,7 +381,7 @@ def test_orchestrator_caches_after_first_resolve():
     cache = PerRunRefCache()
     counting_tier = MagicMock()
     counting_tier.name = "counting"
-    counting_tier.try_resolve.return_value = SHA_A
+    counting_tier.try_resolve.return_value = _resolution()
     legacy = _make_legacy_with(SHA_A)
     resolver = TieredRefResolver(
         tiers=[L0PerRunCache(cache=cache), counting_tier, legacy],
@@ -311,7 +407,7 @@ def test_seed_populates_l0_and_avoids_network_tier():
     cache = PerRunRefCache()
     network_tier = MagicMock()
     network_tier.name = "commits_api"
-    network_tier.try_resolve.return_value = SHA_B  # would win if reached
+    network_tier.try_resolve.return_value = _resolution(SHA_B)  # would win if reached
     legacy = _make_legacy_with(SHA_B)
     resolver = TieredRefResolver(
         tiers=[L0PerRunCache(cache=cache), network_tier, legacy],
@@ -335,7 +431,7 @@ def test_sha_ref_counts_as_passthrough_not_commits_api():
     cache = PerRunRefCache()
     network_tier = MagicMock()
     network_tier.name = "commits_api"
-    network_tier.try_resolve.return_value = SHA_B
+    network_tier.try_resolve.return_value = _resolution(SHA_B)
     legacy = _make_legacy_with(SHA_B)
     resolver = TieredRefResolver(
         tiers=[L0PerRunCache(cache=cache), network_tier, legacy],
@@ -394,7 +490,7 @@ def test_orchestrator_collapses_concurrent_resolves():
         call_count[0] += 1
         in_flight.set()
         can_continue.wait(timeout=2)
-        return SHA_A
+        return _resolution()
 
     slow = MagicMock()
     slow.name = "slow"
@@ -447,7 +543,7 @@ def test_orchestrator_falls_through_when_all_tiers_return_none():
 
 def test_orchestrator_handles_string_input():
     cache = PerRunRefCache()
-    cache.put(_repository_cache_identity(_dep()), "main", SHA_A)
+    cache.put(_repository_cache_identity(_dep()), "main", _resolution())
     legacy = _make_legacy_with(SHA_A)
     resolver = TieredRefResolver(
         tiers=[L0PerRunCache(cache=cache), legacy],
@@ -530,8 +626,8 @@ def test_factory_excludes_l2_when_update_refs_true(monkeypatch):
     tier_names = [t.name for t in resolver._tiers]
     # bare_rev_parse must NOT be present
     assert "bare_rev_parse" not in tier_names
-    # L0, L1, L3 remain
-    assert tier_names == ["per_run_cache", "commits_api", "legacy_clone"]
+    # L0, L1, exact remote ref, and L3 remain.
+    assert tier_names == ["per_run_cache", "commits_api", "remote_ref", "legacy_clone"]
 
 
 def test_factory_includes_l2_when_update_refs_false(monkeypatch):
@@ -573,7 +669,7 @@ def test_stale_bare_bypassed_on_update(monkeypatch, tmp_path):
     downloader = MagicMock()
     fake_refs = MagicMock()
     fake_refs.resolve_commit_sha_for_ref.return_value = None
-    fake_refs.resolve.return_value = ResolvedReference(
+    fake_refs.resolve_remote_ref.return_value = ResolvedReference(
         original_ref="owner/repo#main",
         ref_type=GitReferenceType.BRANCH,
         resolved_commit=SHA_B,
@@ -588,14 +684,16 @@ def test_stale_bare_bypassed_on_update(monkeypatch, tmp_path):
     )
     assert isinstance(resolver, TieredRefResolver)
 
-    with patch.object(L2BareRevParse, "_rev_parse", return_value=SHA_A) as stale_l2:
+    with patch.object(L2BareRevParse, "_rev_parse", return_value=_resolution()) as stale_l2:
         result = resolver.resolve(_dep(repo="owner/repo", ref="main"))
 
     assert result.resolved_commit == SHA_B
     stale_l2.assert_not_called()
     fake_refs.resolve_commit_sha_for_ref.assert_called_once()
-    fake_refs.resolve.assert_called_once()
-    assert resolver.stats["legacy_clone"] == 1
+    fake_refs.resolve_remote_ref.assert_called_once()
+    fake_refs.resolve.assert_not_called()
+    assert resolver.stats["remote_ref"] == 1
+    assert resolver.stats["legacy_clone"] == 0
     assert "bare_rev_parse" not in resolver.stats
 
 
@@ -616,7 +714,7 @@ def test_normal_policy_uses_l2_when_api_unavailable_without_clone(monkeypatch, t
     )
     assert isinstance(resolver, TieredRefResolver)
 
-    with patch.object(L2BareRevParse, "_rev_parse", return_value=SHA_A) as cached_l2:
+    with patch.object(L2BareRevParse, "_rev_parse", return_value=_resolution()) as cached_l2:
         result = resolver.resolve(_dep())
 
     assert result.resolved_commit == SHA_A
@@ -635,6 +733,7 @@ def test_current_policy_fails_closed_when_remote_tiers_fail(monkeypatch, tmp_pat
     downloader = MagicMock()
     fake_refs = MagicMock()
     fake_refs.resolve_commit_sha_for_ref.return_value = None
+    fake_refs.resolve_remote_ref.return_value = None
     fake_refs.resolve.side_effect = RuntimeError("remote unavailable")
     downloader._refs = fake_refs
     resolver = build_tiered_ref_resolver(
@@ -645,7 +744,7 @@ def test_current_policy_fails_closed_when_remote_tiers_fail(monkeypatch, tmp_pat
     assert isinstance(resolver, TieredRefResolver)
 
     with (
-        patch.object(L2BareRevParse, "_rev_parse", return_value=SHA_A) as stale_l2,
+        patch.object(L2BareRevParse, "_rev_parse", return_value=_resolution()) as stale_l2,
         pytest.raises(RuntimeError, match="remote unavailable"),
     ):
         resolver.resolve(_dep())
@@ -653,3 +752,129 @@ def test_current_policy_fails_closed_when_remote_tiers_fail(monkeypatch, tmp_pat
     stale_l2.assert_not_called()
     assert resolver._cache.size() == 0
     assert "bare_rev_parse" not in resolver.stats
+
+
+def test_current_policy_remote_tag_type_survives_cache_hit(monkeypatch):
+    monkeypatch.setenv("APM_TIERED_RESOLVER", "1")
+    downloader = MagicMock()
+    fake_refs = MagicMock()
+    fake_refs.resolve_commit_sha_for_ref.return_value = None
+    fake_refs.resolve_remote_ref.return_value = ResolvedReference(
+        original_ref="owner/repo#release",
+        ref_type=GitReferenceType.TAG,
+        resolved_commit=SHA_B,
+        ref_name="release",
+    )
+    downloader._refs = fake_refs
+    resolver = build_tiered_ref_resolver(
+        downloader=downloader,
+        freshness_policy=RefFreshnessPolicy.CURRENT_REMOTE,
+    )
+    assert isinstance(resolver, TieredRefResolver)
+    dep = _dep(ref="release")
+
+    first = resolver.resolve(dep)
+    second = resolver.resolve(dep)
+
+    assert first.ref_type is GitReferenceType.TAG
+    assert second.ref_type is GitReferenceType.TAG
+    assert first.resolved_commit == second.resolved_commit == SHA_B
+    fake_refs.resolve_remote_ref.assert_called_once()
+    fake_refs.resolve.assert_not_called()
+    assert resolver.stats["remote_ref"] == 1
+    assert resolver.stats["per_run_cache"] == 1
+
+
+def test_current_policy_runs_exact_remote_after_commits_api(monkeypatch):
+    monkeypatch.setenv("APM_TIERED_RESOLVER", "1")
+    calls = []
+    fake_refs = MagicMock()
+
+    def commits_api(dep_ref, ref):
+        calls.append("commits_api")
+        return SHA_A
+
+    def remote_ref(dep_ref, ref):
+        calls.append("remote_ref")
+        return ResolvedReference(
+            original_ref=str(dep_ref),
+            ref_type=GitReferenceType.BRANCH,
+            resolved_commit=SHA_B,
+            ref_name=ref,
+        )
+
+    fake_refs.resolve_commit_sha_for_ref.side_effect = commits_api
+    fake_refs.resolve_remote_ref.side_effect = remote_ref
+    downloader = MagicMock()
+    downloader._refs = fake_refs
+    resolver = build_tiered_ref_resolver(
+        downloader=downloader,
+        freshness_policy=RefFreshnessPolicy.CURRENT_REMOTE,
+    )
+    assert isinstance(resolver, TieredRefResolver)
+
+    result = resolver.resolve(_dep())
+
+    assert calls == ["commits_api", "remote_ref"]
+    assert result.resolved_commit == SHA_B
+    fake_refs.resolve.assert_not_called()
+
+
+def test_current_policy_clone_fallback_runs_once_after_remote_miss(monkeypatch):
+    monkeypatch.setenv("APM_TIERED_RESOLVER", "1")
+    downloader = MagicMock()
+    fake_refs = MagicMock()
+    fake_refs.resolve_commit_sha_for_ref.return_value = SHA_A
+    fake_refs.resolve_remote_ref.return_value = None
+    fake_refs.resolve.return_value = ResolvedReference(
+        original_ref="owner/repo#release",
+        ref_type=GitReferenceType.TAG,
+        resolved_commit=SHA_C,
+        ref_name="release",
+    )
+    downloader._refs = fake_refs
+    resolver = build_tiered_ref_resolver(
+        downloader=downloader,
+        freshness_policy=RefFreshnessPolicy.CURRENT_REMOTE,
+    )
+    assert isinstance(resolver, TieredRefResolver)
+
+    result = resolver.resolve(_dep(ref="release"))
+
+    assert result.ref_type is GitReferenceType.TAG
+    assert result.resolved_commit == SHA_C
+    fake_refs.resolve_commit_sha_for_ref.assert_called_once()
+    fake_refs.resolve_remote_ref.assert_called_once()
+    fake_refs.resolve.assert_called_once()
+    assert resolver.stats["legacy_clone"] == 1
+
+
+def test_current_policy_coalesces_equivalent_normalized_urls(monkeypatch):
+    monkeypatch.setenv("APM_TIERED_RESOLVER", "1")
+    downloader = MagicMock()
+    fake_refs = MagicMock()
+    fake_refs.resolve_commit_sha_for_ref.return_value = None
+    fake_refs.resolve_remote_ref.return_value = ResolvedReference(
+        original_ref="owner/repo#main",
+        ref_type=GitReferenceType.BRANCH,
+        resolved_commit=SHA_A,
+        ref_name="main",
+    )
+    downloader._refs = fake_refs
+    resolver = build_tiered_ref_resolver(
+        downloader=downloader,
+        freshness_policy=RefFreshnessPolicy.CURRENT_REMOTE,
+    )
+    assert isinstance(resolver, TieredRefResolver)
+    implicit = DependencyReference(repo_url="owner/repo", reference="main")
+    explicit = DependencyReference(
+        repo_url="owner/repo",
+        host="github.com",
+        reference="main",
+    )
+
+    first = resolver.resolve(implicit)
+    second = resolver.resolve(explicit)
+
+    assert first.resolved_commit == second.resolved_commit == SHA_A
+    fake_refs.resolve_remote_ref.assert_called_once()

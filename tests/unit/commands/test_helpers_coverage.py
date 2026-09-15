@@ -108,16 +108,16 @@ class TestLazyConfirm:
 class TestPrintVersionShaFalsy:
     def test_no_sha_not_appended_to_version_string(self) -> None:
         """Branch 341->344: sha empty → version_str unchanged (no parenthetical)."""
-        from apm_cli.commands._helpers import print_version
+        from apm_cli.version import print_version
 
         ctx = MagicMock()
         ctx.resilient_parsing = False
 
         mock_console = MagicMock()
         with (
-            patch("apm_cli.commands._helpers.get_version", return_value="1.2.3"),
-            patch("apm_cli.commands._helpers.get_build_sha", return_value=""),
-            patch("apm_cli.commands._helpers._get_console", return_value=mock_console),
+            patch("apm_cli.version.get_version", return_value="1.2.3"),
+            patch("apm_cli.version.get_build_sha", return_value=""),
+            patch("apm_cli.version._get_console", return_value=mock_console),
         ):
             print_version(ctx, None, True)
 
@@ -130,7 +130,7 @@ class TestPrintVersionShaFalsy:
 class TestPrintVersionConsoleException:
     def test_console_print_exception_falls_back_to_click_echo(self) -> None:
         """Lines 350-354: console.print raises → click.echo fallback."""
-        from apm_cli.commands._helpers import print_version
+        from apm_cli.version import print_version
 
         ctx = MagicMock()
         ctx.resilient_parsing = False
@@ -139,37 +139,36 @@ class TestPrintVersionConsoleException:
         mock_console.print.side_effect = Exception("markup failure")
 
         with (
-            patch("apm_cli.commands._helpers.get_version", return_value="2.3.4"),
-            patch("apm_cli.commands._helpers.get_build_sha", return_value="abc1234"),
-            patch("apm_cli.commands._helpers._get_console", return_value=mock_console),
-            patch("apm_cli.commands._helpers.click") as mock_click,
+            patch("apm_cli.version.get_version", return_value="2.3.4"),
+            patch("apm_cli.version.get_build_sha", return_value="abc1234"),
+            patch("apm_cli.version._get_console", return_value=mock_console),
+            patch("click.echo") as mock_echo,
         ):
-            # Suppress is_enabled import error if experimental module absent
             print_version(ctx, None, True)
 
-        mock_click.echo.assert_called()
-        text = mock_click.echo.call_args[0][0]
+        mock_echo.assert_called()
+        text = mock_echo.call_args[0][0]
         assert "2.3.4" in text
 
 
 class TestPrintVersionNoConsole:
     def test_no_console_falls_back_to_click_echo(self) -> None:
         """Lines 352-354: console is None → click.echo fallback."""
-        from apm_cli.commands._helpers import print_version
+        from apm_cli.version import print_version
 
         ctx = MagicMock()
         ctx.resilient_parsing = False
 
         with (
-            patch("apm_cli.commands._helpers.get_version", return_value="3.0.0"),
-            patch("apm_cli.commands._helpers.get_build_sha", return_value=""),
-            patch("apm_cli.commands._helpers._get_console", return_value=None),
-            patch("apm_cli.commands._helpers.click") as mock_click,
+            patch("apm_cli.version.get_version", return_value="3.0.0"),
+            patch("apm_cli.version.get_build_sha", return_value=""),
+            patch("apm_cli.version._get_console", return_value=None),
+            patch("click.echo") as mock_echo,
         ):
             print_version(ctx, None, True)
 
-        mock_click.echo.assert_called()
-        text = mock_click.echo.call_args[0][0]
+        mock_echo.assert_called()
+        text = mock_echo.call_args[0][0]
         assert "3.0.0" in text
 
 

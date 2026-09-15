@@ -6,17 +6,19 @@ Issue #1369: ``apm update -y -v`` ran the integrate loop serially, calling
 A 9-dep manifest pointing at 3 unique (repo, ref) tuples produced 9
 clones. On Windows + Defender + a slow ADO endpoint that scaled to 1583s.
 
-This module collapses that work via a four-tier waterfall executed by
+This module collapses that work via a policy-specific tier waterfall executed by
 :class:`TieredRefResolver`:
 
-* **L0 PerRunCache** -- in-memory ``{(url, ref): sha}``. Zero I/O.
+* **L0 PerRunCache** -- in-memory typed ``{(url, ref): resolution}``. Zero I/O.
   Catches the duplicate-within-run case (9 deps -> 3 underlying resolves).
 * **L1 CommitsAPI** -- cheap ``GET /repos/.../commits/{ref}`` against the
   GitHub-family host_backend, with ``Accept: application/vnd.github.sha``
   + optional ``HttpCache`` ETag. ~1 RTT.
 * **L2 BareRevParse** -- if the cross-run :class:`GitCache` already has a
-  bare clone of the URL, ``git rev-parse refs/heads/REF`` against it.
+  bare clone of the URL, resolve the exact branch or tag against it.
   Zero network. Catches the second-run case.
+* **L2 RemoteRef** -- for current-remote resolution, query only the exact
+  branch, tag, and peeled-tag refs through the authenticated transport owner.
 * **L3 LegacyClone** -- delegates to the legacy
   :meth:`GitReferenceResolver.resolve` (shallow clone + introspect).
   Behaviourally identical to the pre-#1369 path; always succeeds or
@@ -55,6 +57,7 @@ from ..models.apm_package import (
     GitReferenceType,
     ResolvedReference,
 )
+from ..models.dependency.types import parse_git_reference
 from ..utils.github_host import default_host
 
 if TYPE_CHECKING:
@@ -147,24 +150,45 @@ def is_tiered_resolver_enabled() -> bool:
 # ---------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class RefResolution:
+    """Immutable typed result shared by tiers and the per-run cache."""
+
+    ref_type: GitReferenceType
+    resolved_commit: str
+    ref_name: str
+
+    @classmethod
+    def from_resolved_reference(cls, resolved: ResolvedReference) -> RefResolution | None:
+        """Build a cache-safe result without retaining caller-specific text."""
+        sha = resolved.resolved_commit
+        if not sha or not _SHA_RE.match(sha):
+            return None
+        return cls(
+            ref_type=resolved.ref_type,
+            resolved_commit=sha.lower(),
+            ref_name=resolved.ref_name,
+        )
+
+
 class PerRunRefCache:
-    """Thread-safe in-memory ``{(url, ref): sha}`` cache.
+    """Thread-safe in-memory typed ``{(url, ref): resolution}`` cache.
 
     Lives for the duration of one install/update/outdated run. Cleared
     by simply dropping the surrounding :class:`TieredRefResolver`.
     """
 
     def __init__(self) -> None:
-        self._store: dict[tuple[str, str], str] = {}
+        self._store: dict[tuple[str, str], RefResolution] = {}
         self._lock = threading.Lock()
 
-    def get(self, url: str, ref: str) -> str | None:
+    def get(self, url: str, ref: str) -> RefResolution | None:
         with self._lock:
             return self._store.get((url, ref))
 
-    def put(self, url: str, ref: str, sha: str) -> None:
+    def put(self, url: str, ref: str, resolution: RefResolution) -> None:
         with self._lock:
-            self._store[(url, ref)] = sha
+            self._store[(url, ref)] = resolution
 
     def size(self) -> int:
         with self._lock:
@@ -178,11 +202,11 @@ class PerRunRefCache:
 
 @runtime_checkable
 class RefResolutionTier(Protocol):
-    """Single resolution strategy. Returns the SHA or ``None`` to fall through."""
+    """Single strategy returning a typed result or ``None`` to fall through."""
 
     name: str
 
-    def try_resolve(self, dep_ref: DependencyReference, ref: str) -> str | None: ...
+    def try_resolve(self, dep_ref: DependencyReference, ref: str) -> RefResolution | None: ...
 
 
 # ---------------------------------------------------------------------------
@@ -197,7 +221,7 @@ class L0PerRunCache:
     cache: PerRunRefCache
     name: str = "per_run_cache"
 
-    def try_resolve(self, dep_ref: DependencyReference, ref: str) -> str | None:
+    def try_resolve(self, dep_ref: DependencyReference, ref: str) -> RefResolution | None:
         return self.cache.get(_repository_cache_identity(dep_ref), ref)
 
 
@@ -216,6 +240,8 @@ class L1CommitsAPI:
     makes one HTTP attempt so rate limiting cannot delay L2/L3 fallback.
     Returns ``None`` for hosts whose backend has no cheap commits endpoint
     (e.g. ADO today); the caller then falls through to L2/L3.
+    Current-remote stacks also treat a named-ref API result as non-terminal:
+    the exact remote tier must establish branch versus tag before caching.
 
     Future: an explicit :class:`HttpCache` ETag pass could be added here
     for unauthenticated requests (the underlying helper does not yet
@@ -224,12 +250,22 @@ class L1CommitsAPI:
 
     name = "commits_api"
 
-    def __init__(self, host: object) -> None:
+    def __init__(
+        self,
+        host: object,
+        *,
+        allow_syntax_type_hint: bool = True,
+    ) -> None:
         self._host = host
+        self._allow_syntax_type_hint = allow_syntax_type_hint
 
-    def try_resolve(self, dep_ref: DependencyReference, ref: str) -> str | None:
+    def try_resolve(self, dep_ref: DependencyReference, ref: str) -> RefResolution | None:
         if _SHA_RE.match(ref or ""):
-            return ref.lower()
+            return RefResolution(
+                ref_type=GitReferenceType.COMMIT,
+                resolved_commit=ref.lower(),
+                ref_name=ref,
+            )
 
         try:
             if dep_ref.is_artifactory() or dep_ref.is_azure_devops():
@@ -248,7 +284,14 @@ class L1CommitsAPI:
                 return None
             sha = resolver.resolve_commit_sha_for_ref(dep_ref, ref)
             if sha and _SHA_RE.match(sha):
-                return sha.lower()
+                if not self._allow_syntax_type_hint:
+                    return None
+                ref_type, ref_name = parse_git_reference(ref)
+                return RefResolution(
+                    ref_type=ref_type,
+                    resolved_commit=sha.lower(),
+                    ref_name=ref_name,
+                )
             return None
         except Exception as exc:
             _log.debug(
@@ -279,11 +322,15 @@ class L2BareRevParse:
     def __init__(self, git_cache: GitCache | None) -> None:
         self._git_cache = git_cache
 
-    def try_resolve(self, dep_ref: DependencyReference, ref: str) -> str | None:
+    def try_resolve(self, dep_ref: DependencyReference, ref: str) -> RefResolution | None:
         if self._git_cache is None or not ref:
             return None
         if _SHA_RE.match(ref):
-            return ref.lower()
+            return RefResolution(
+                ref_type=GitReferenceType.COMMIT,
+                resolved_commit=ref.lower(),
+                ref_name=ref,
+            )
 
         try:
             from ..cache.url_normalize import cache_shard_key
@@ -310,7 +357,7 @@ class L2BareRevParse:
         return self._rev_parse(bare_dir, ref)
 
     @staticmethod
-    def _rev_parse(bare_dir: Path, ref: str) -> str | None:
+    def _rev_parse(bare_dir: Path, ref: str) -> RefResolution | None:
         import subprocess
 
         from ..utils.git_env import get_git_executable, git_subprocess_env
@@ -318,11 +365,7 @@ class L2BareRevParse:
         git_exe = get_git_executable()
         env = git_subprocess_env()
 
-        # Try refs/heads/REF, refs/tags/REF, then REF (covers branch,
-        # tag, and SHA prefix). All against the existing bare; no
-        # network. ``--verify`` ensures we only accept an exact match.
-        candidates = (f"refs/heads/{ref}", f"refs/tags/{ref}", ref)
-        for candidate in candidates:
+        def resolve_candidate(candidate: str) -> str | None:
             try:
                 result = subprocess.run(
                     [git_exe, "--git-dir", str(bare_dir), "rev-parse", "--verify", candidate],
@@ -332,12 +375,50 @@ class L2BareRevParse:
                     env=env,
                 )
             except (subprocess.TimeoutExpired, OSError):
-                continue
+                return None
             if result.returncode == 0:
                 sha = (result.stdout or "").strip().lower()
                 if _SHA_RE.match(sha):
                     return sha
+            return None
+
+        branch_sha = resolve_candidate(f"refs/heads/{ref}^{{commit}}")
+        tag_sha = resolve_candidate(f"refs/tags/{ref}^{{commit}}")
+        if branch_sha and tag_sha:
+            return None
+        if branch_sha:
+            return RefResolution(
+                ref_type=GitReferenceType.BRANCH,
+                resolved_commit=branch_sha,
+                ref_name=ref,
+            )
+        if tag_sha:
+            return RefResolution(
+                ref_type=GitReferenceType.TAG,
+                resolved_commit=tag_sha,
+                ref_name=ref,
+            )
         return None
+
+
+# ---------------------------------------------------------------------------
+# L2: exact remote ref lookup
+# ---------------------------------------------------------------------------
+
+
+class L2RemoteRef:
+    """Resolve one exact remote branch or tag through GitReferenceResolver."""
+
+    name = "remote_ref"
+
+    def __init__(self, resolver: GitReferenceResolver) -> None:
+        self._resolver = resolver
+
+    def try_resolve(self, dep_ref: DependencyReference, ref: str) -> RefResolution | None:
+        resolved = self._resolver.resolve_remote_ref(dep_ref, ref)
+        if resolved is None:
+            return None
+        return RefResolution.from_resolved_reference(resolved)
 
 
 # ---------------------------------------------------------------------------
@@ -359,20 +440,9 @@ class L3LegacyClone:
     def __init__(self, legacy_resolver: GitReferenceResolver) -> None:
         self._legacy = legacy_resolver
 
-    def try_resolve(self, dep_ref: DependencyReference, ref: str) -> str | None:
-        try:
-            resolved = self._legacy.resolve(dep_ref)
-        except Exception as exc:
-            _log.debug(
-                "L3 legacy resolve failed for %s (%s)",
-                dep_ref.repo_url,
-                type(exc).__name__,
-            )
-            return None
-        sha = getattr(resolved, "resolved_commit", None)
-        if sha and _SHA_RE.match(sha):
-            return sha.lower()
-        return None
+    def try_resolve(self, dep_ref: DependencyReference, ref: str) -> RefResolution | None:
+        resolved = self._legacy.resolve(dep_ref)
+        return RefResolution.from_resolved_reference(resolved)
 
     def resolve_full(self, dep_ref: DependencyReference) -> ResolvedReference:
         """Return the full :class:`ResolvedReference` from the legacy path.
@@ -390,7 +460,7 @@ class L3LegacyClone:
 
 
 class TieredRefResolver:
-    """Run the four-tier waterfall with per-run dedup + coalescing.
+    """Run the policy-specific tier waterfall with per-run dedup + coalescing.
 
     Lifetime: per install/update/outdated run. The factory
     :func:`build_tiered_ref_resolver` constructs an instance during the
@@ -419,7 +489,13 @@ class TieredRefResolver:
         # so verbose tier stats do not inflate the commits-API count.
         self.stats["sha_passthrough"] = 0
 
-    def seed(self, repo_ref: str | DependencyReference, ref: str, sha: str) -> bool:
+    def seed(
+        self,
+        repo_ref: str | DependencyReference,
+        ref: str,
+        sha: str,
+        ref_type: GitReferenceType | None = None,
+    ) -> bool:
         """Pre-populate the L0 per-run cache with a known ``ref -> sha``.
 
         Used by the resolve phase to inject a lockfile-recorded commit
@@ -438,7 +514,16 @@ class TieredRefResolver:
         if not ref or not sha or not _SHA_RE.match(sha):
             return False
         dep_ref = self._normalize(repo_ref)
-        self._cache.put(_repository_cache_identity(dep_ref), ref, sha.lower())
+        resolved_type = ref_type or parse_git_reference(ref)[0]
+        self._cache.put(
+            _repository_cache_identity(dep_ref),
+            ref,
+            RefResolution(
+                ref_type=resolved_type,
+                resolved_commit=sha.lower(),
+                ref_name=ref,
+            ),
+        )
         return True
 
     def resolve(self, repo_ref: str | DependencyReference) -> ResolvedReference:
@@ -463,7 +548,15 @@ class TieredRefResolver:
         # inflated ``commits_api`` even though no HTTP call was made.
         if _SHA_RE.match(ref):
             self.stats["sha_passthrough"] = self.stats.get("sha_passthrough", 0) + 1
-            return self._build_result(dep_ref, ref, ref.lower(), tier_name="sha_passthrough")
+            return self._build_result(
+                dep_ref,
+                RefResolution(
+                    ref_type=GitReferenceType.COMMIT,
+                    resolved_commit=ref.lower(),
+                    ref_name=ref,
+                ),
+                tier_name="sha_passthrough",
+            )
 
         key = (_repository_cache_identity(dep_ref), ref)
 
@@ -472,7 +565,7 @@ class TieredRefResolver:
         cached = self._cache.get(*key)
         if cached:
             self.stats["per_run_cache"] += 1
-            return self._build_result(dep_ref, ref, cached, tier_name="per_run_cache")
+            return self._build_result(dep_ref, cached, tier_name="per_run_cache")
 
         # Coalesce concurrent resolves of the same key.
         with self._coalesce_lock:
@@ -488,14 +581,14 @@ class TieredRefResolver:
             self.stats["coalesced"] += 1
             cached = self._cache.get(*key)
             if cached:
-                return self._build_result(dep_ref, ref, cached, tier_name="coalesced")
+                return self._build_result(dep_ref, cached, tier_name="coalesced")
             # Leader failed -- fall through and try ourselves.
 
         try:
-            sha = self._dispatch(dep_ref, ref)
-            if sha:
-                self._cache.put(*key, sha)
-                return self._build_result(dep_ref, ref, sha, tier_name=self._last_tier)
+            resolution = self._dispatch(dep_ref, ref)
+            if resolution:
+                self._cache.put(*key, resolution)
+                return self._build_result(dep_ref, resolution, tier_name=self._last_tier)
             # All tiers returned None and L3 included -- this is
             # genuine failure (e.g. ref not found). Re-raise from
             # legacy so callers get the original error message.
@@ -507,18 +600,20 @@ class TieredRefResolver:
                 if event is not None:
                     event.set()
 
-    def _dispatch(self, dep_ref: DependencyReference, ref: str) -> str | None:
+    def _dispatch(self, dep_ref: DependencyReference, ref: str) -> RefResolution | None:
         self._last_tier = "none"
         for tier in self._tiers:
             try:
-                sha = tier.try_resolve(dep_ref, ref)
+                resolution = tier.try_resolve(dep_ref, ref)
             except Exception as exc:
+                if tier is self._legacy:
+                    raise
                 _log.debug("Tier %s raised (%s)", tier.name, type(exc).__name__)
                 continue
-            if sha and _SHA_RE.match(sha):
+            if resolution and _SHA_RE.match(resolution.resolved_commit):
                 self.stats[tier.name] = self.stats.get(tier.name, 0) + 1
                 self._last_tier = tier.name
-                return sha.lower()
+                return resolution
         return None
 
     @staticmethod
@@ -533,32 +628,22 @@ class TieredRefResolver:
     @staticmethod
     def _build_result(
         dep_ref: DependencyReference,
-        ref: str,
-        sha: str,
+        resolution: RefResolution,
         *,
         tier_name: str,
     ) -> ResolvedReference:
-        # Choose ref_type heuristically. The cheap tiers do not
-        # distinguish branch vs tag (a single SHA-returning API call
-        # cannot tell you which container the ref lives in without a
-        # second call). We pick COMMIT when the input *was* a SHA-like
-        # string and BRANCH otherwise. Callers that need precise
-        # distinction (today: cache eligibility in integrate.py:77)
-        # already treat BRANCH and TAG identically when the SHA
-        # matches the lockfile, so the heuristic is behaviour-safe.
-        ref_type = GitReferenceType.COMMIT if _SHA_RE.match(ref) else GitReferenceType.BRANCH
         _log.debug(
             "TieredRefResolver: %s @ %s -> %s (via %s)",
             dep_ref.repo_url,
-            ref,
-            sha[:12],
+            resolution.ref_name,
+            resolution.resolved_commit[:12],
             tier_name,
         )
         return ResolvedReference(
             original_ref=str(dep_ref),
-            ref_type=ref_type,
-            resolved_commit=sha,
-            ref_name=ref,
+            ref_type=resolution.ref_type,
+            resolved_commit=resolution.resolved_commit,
+            ref_name=resolution.ref_name,
         )
 
 
@@ -606,7 +691,10 @@ def build_tiered_ref_resolver(
 
     tiers: list[RefResolutionTier] = [
         L0PerRunCache(cache=cache),
-        L1CommitsAPI(host=downloader),
+        L1CommitsAPI(
+            host=downloader,
+            allow_syntax_type_hint=not freshness_policy.requires_remote,
+        ),
     ]
     if freshness_policy.allows_bare_cache:
         tiers.append(L2BareRevParse(git_cache=git_cache))
@@ -615,6 +703,8 @@ def build_tiered_ref_resolver(
             "TieredRefResolver: L2BareRevParse excluded by %s policy",
             freshness_policy.value,
         )
+    if freshness_policy.requires_remote:
+        tiers.append(L2RemoteRef(resolver=legacy_inner))
     tiers.append(legacy)
 
     return TieredRefResolver(

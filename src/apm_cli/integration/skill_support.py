@@ -1,11 +1,17 @@
 """Supporting value objects and cleanup helpers for skill integration."""
 
+from __future__ import annotations
+
 import shutil
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from apm_cli.core.deployment_state import MaterializationResult
+
+if TYPE_CHECKING:
+    from apm_cli.integration.skill_ownership import SkillOwnershipIndex
 
 
 def build_copy_ignore(
@@ -53,7 +59,8 @@ def clean_orphaned_skills(
     installed_skill_names: set,
     *,
     project_root: Path | None,
-    get_lockfile_owned_agent_skills: Callable[[Path], set[str]],
+    ownership_index: SkillOwnershipIndex | None = None,
+    get_lockfile_owned_agent_skills: Callable[[Path], set[str]] | None = None,
 ) -> dict[str, int]:
     """Remove legacy-orphan skill directories without touching foreign agents."""
     protected_names = set(installed_skill_names)
@@ -65,7 +72,10 @@ def clean_orphaned_skills(
     errors = 0
     lockfile_owned_skills: set[str] | None = None
     if skills_dir.parent.name == ".agents" and project_root is not None:
-        lockfile_owned_skills = get_lockfile_owned_agent_skills(project_root)
+        if ownership_index is not None:
+            lockfile_owned_skills = ownership_index.owned_agent_skill_names()
+        elif get_lockfile_owned_agent_skills is not None:
+            lockfile_owned_skills = get_lockfile_owned_agent_skills(project_root)
 
     for skill_subdir in skills_dir.iterdir():
         if not skill_subdir.is_dir() or skill_subdir.name in protected_names:
@@ -83,20 +93,6 @@ def clean_orphaned_skills(
 
 def get_lockfile_owned_agent_skills(project_root: Path) -> set[str]:
     """Return APM-owned ``.agents/skills`` names from the lockfile."""
-    owned: set[str] = set()
-    try:
-        from apm_cli.deps.lockfile import LockFile, get_lockfile_path
+    from apm_cli.integration.skill_ownership import SkillOwnershipIndex
 
-        lockfile = LockFile.read(get_lockfile_path(project_root))
-        if lockfile and lockfile.dependencies:
-            for dep in lockfile.dependencies.values():
-                for deployed_file in dep.deployed_files:
-                    if deployed_file.startswith(".agents/skills/"):
-                        name = deployed_file[len(".agents/skills/") :].split("/", 1)[0]
-                        if name:
-                            owned.add(name)
-    except (FileNotFoundError, OSError, KeyError, ValueError, TypeError, AttributeError) as exc:
-        import logging
-
-        logging.getLogger(__name__).debug("Could not read lockfile for ownership check: %s", exc)
-    return owned
+    return SkillOwnershipIndex.load_for_cleanup(project_root).owned_agent_skill_names()

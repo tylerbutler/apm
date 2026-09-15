@@ -36,6 +36,7 @@ from apm_cli.deps.transport_selection import (
     TransportSelector,
 )
 from apm_cli.models.dependency.reference import DependencyReference
+from apm_cli.models.dependency.types import GitReferenceType
 from tests.utils.git_credential_sentinel import (
     credential_helper_trap_env,
     exercise_credential_helper,
@@ -476,6 +477,150 @@ class TestListRemoteRefs:
             resolver = GitReferenceResolver(host)
             with pytest.raises(RuntimeError, match=r"\[REDACTED\] sanitized"):
                 resolver.list_remote_refs(_dep(host="github.com"))
+
+
+# ---------------------------------------------------------------------------
+# resolve_remote_ref
+# ---------------------------------------------------------------------------
+
+
+class TestResolveRemoteRef:
+    BRANCH_SHA = "a" * 40
+    TAG_OBJECT_SHA = "b" * 40
+    TAG_COMMIT_SHA = "c" * 40
+
+    def _resolve(self, output: str, *, ref: str = "release"):
+        host = _ctx(token="ghp_xxx")
+        with patch("apm_cli.deps.github_downloader.git.cmd.Git") as mock_git:
+            mock_git.return_value.ls_remote.return_value = output
+            dep = _dep(host="github.com", reference=ref)
+            result = GitReferenceResolver(host).resolve_remote_ref(dep, ref)
+        return result, mock_git.return_value.ls_remote
+
+    def test_branch_preserves_type_and_queries_only_exact_patterns(self):
+        result, ls_remote = self._resolve(f"{self.BRANCH_SHA}\trefs/heads/release\n")
+
+        assert result is not None
+        assert result.ref_type is GitReferenceType.BRANCH
+        assert result.resolved_commit == self.BRANCH_SHA
+        ls_remote.assert_called_once()
+        args = ls_remote.call_args.args
+        assert args[1:] == (
+            "refs/heads/release",
+            "refs/tags/release",
+            "refs/tags/release^{}",
+        )
+
+    def test_lightweight_tag_preserves_tag_type(self):
+        result, _ = self._resolve(f"{self.TAG_COMMIT_SHA}\trefs/tags/release\n")
+
+        assert result is not None
+        assert result.ref_type is GitReferenceType.TAG
+        assert result.resolved_commit == self.TAG_COMMIT_SHA
+
+    def test_annotated_tag_uses_peeled_commit(self):
+        result, _ = self._resolve(
+            f"{self.TAG_OBJECT_SHA}\trefs/tags/release\n"
+            f"{self.TAG_COMMIT_SHA}\trefs/tags/release^{{}}\n"
+        )
+
+        assert result is not None
+        assert result.ref_type is GitReferenceType.TAG
+        assert result.resolved_commit == self.TAG_COMMIT_SHA
+
+    def test_branch_tag_ambiguity_returns_none(self):
+        result, _ = self._resolve(
+            f"{self.BRANCH_SHA}\trefs/heads/release\n{self.TAG_COMMIT_SHA}\trefs/tags/release\n"
+        )
+
+        assert result is None
+
+    @pytest.mark.parametrize(
+        "output",
+        [
+            "",
+            "\n",
+            "not-a-sha\trefs/heads/release\n",
+            f"{BRANCH_SHA} refs/heads/release\n",
+            f"{BRANCH_SHA}\trefs/heads/other\n",
+            f"{BRANCH_SHA}\trefs/heads/release\n{BRANCH_SHA}\trefs/heads/release\n",
+            f"{TAG_COMMIT_SHA}\trefs/tags/release^{{}}\n",
+        ],
+    )
+    def test_missing_or_malformed_output_returns_none(self, output):
+        result, _ = self._resolve(output)
+        assert result is None
+
+    def test_invalid_ref_name_does_not_start_transport(self):
+        host = _ctx(token="ghp_xxx")
+        resolver = GitReferenceResolver(host)
+
+        with patch("apm_cli.deps.github_downloader.git.cmd.Git") as mock_git:
+            result = resolver.resolve_remote_ref(
+                _dep(host="github.com", reference="release*"),
+                "release*",
+            )
+
+        assert result is None
+        mock_git.assert_not_called()
+
+    def test_ado_reuses_bearer_fallback_for_exact_lookup(self):
+        host = _ctx(token="ado_pat", auth_scheme="basic")
+        branch_output = f"{self.BRANCH_SHA}\trefs/heads/main\n"
+
+        def fallback(dep_ref, primary, bearer, is_fail):
+            primary()
+            return types.SimpleNamespace(
+                outcome=("ok", branch_output),
+                bearer_attempted=True,
+            )
+
+        host.auth_resolver.execute_with_bearer_fallback.side_effect = fallback
+        with patch("apm_cli.deps.github_downloader.git.cmd.Git") as mock_git:
+            mock_git.return_value.ls_remote.return_value = branch_output
+            result = GitReferenceResolver(host).resolve_remote_ref(
+                _dep(ado=True, reference="main"),
+                "main",
+            )
+
+        assert result is not None
+        assert result.ref_type is GitReferenceType.BRANCH
+        host.auth_resolver.execute_with_bearer_fallback.assert_called_once()
+
+    def test_exact_lookup_routes_through_git_remote_refs_owner(self):
+        host = _ctx(token=None)
+        output = f"{self.BRANCH_SHA}\trefs/heads/main\n"
+        completed = subprocess.CompletedProcess(
+            args=[],
+            returncode=0,
+            stdout=output,
+            stderr="",
+        )
+
+        with (
+            patch(
+                "apm_cli.deps.github_downloader.git.cmd.Git",
+                return_value=types.SimpleNamespace(),
+            ),
+            patch(
+                "apm_cli.utils.git_env.git_remote_refs",
+                return_value=completed,
+            ) as remote_refs,
+        ):
+            result = GitReferenceResolver(host).resolve_remote_ref(
+                _dep(host="git.example.com", reference="main"),
+                "main",
+            )
+
+        assert result is not None
+        remote_refs.assert_called_once()
+        assert remote_refs.call_args.args == (
+            "https://example.com/owner/repo.git",
+            "refs/heads/main",
+            "refs/tags/main",
+            "refs/tags/main^{}",
+        )
+        assert remote_refs.call_args.kwargs["options"] == ()
 
 
 # ---------------------------------------------------------------------------

@@ -110,6 +110,20 @@
       "guards": ["install-deployment-base-integrator"]
     },
     {
+      "id": "run-scoped-skill-ownership",
+      "decision": "Lockfile-derived and same-run native skill ownership",
+      "owner": "integration/skill_ownership.py (SkillOwnershipIndex)",
+      "selectors": ["src/apm_cli/integration/skill_ownership.py"],
+      "guards": ["install-deployment-skill-ownership-index"]
+    },
+    {
+      "id": "run-scoped-lockfile-snapshot",
+      "decision": "Run-scoped parsed lockfile state and known-absence semantics",
+      "owner": "install/lockfile_snapshot.py (LockfileSnapshot)",
+      "selectors": ["src/apm_cli/install/lockfile_snapshot.py"],
+      "guards": ["install-deployment-run-scoped-lockfile-snapshot"]
+    },
+    {
       "id": "executable-trust-context",
       "decision": "Executable trust context and per-package approval",
       "owner": "security/executables.py (exec_trust_context_for_project, resolve_exec_decision)",

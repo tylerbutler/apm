@@ -20,6 +20,7 @@ from .skill_integrator import (
     to_hyphen_case,
     validate_skill_name,
 )
+from .skill_ownership import SkillOwnershipIndex
 from .skill_transformer import SkillTransformer
 from .targets import (
     KNOWN_TARGETS,
@@ -45,6 +46,7 @@ __all__ = [
     "PrimitiveMapping",
     "PromptIntegrator",
     "SkillIntegrator",
+    "SkillOwnershipIndex",
     "SkillTransformer",
     "TargetProfile",
     "active_targets",

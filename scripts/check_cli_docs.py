@@ -7,9 +7,7 @@ import argparse
 import sys
 from pathlib import Path
 
-import click
-
-from apm_cli.cli import cli
+from apm_cli.commands.registry import public_command_names
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DIST = REPO_ROOT / "docs" / "dist"
@@ -30,9 +28,9 @@ def recovery_guidance(dist_dir: Path, *, mismatch: bool) -> str:
     )
 
 
-def public_top_level_commands(group: click.Group) -> set[str]:
-    """Return visible top-level names from Click's live command registry."""
-    return {name for name, command in group.commands.items() if not command.hidden}
+def public_top_level_commands() -> set[str]:
+    """Return visible top-level names from the canonical static registry."""
+    return set(public_command_names())
 
 
 def rendered_cli_reference_pages(dist_dir: Path) -> set[str]:
@@ -49,11 +47,10 @@ def rendered_cli_reference_pages(dist_dir: Path) -> set[str]:
 
 
 def registry_docs_mismatches(
-    group: click.Group,
     dist_dir: Path,
 ) -> tuple[list[str], list[str]]:
     """Return missing rendered pages and rendered pages without commands."""
-    commands = public_top_level_commands(group)
+    commands = public_top_level_commands()
     pages = rendered_cli_reference_pages(dist_dir)
     return sorted(commands - pages), sorted(pages - commands)
 
@@ -74,7 +71,6 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         missing_pages, orphan_pages = registry_docs_mismatches(
-            cli,
             args.dist_dir,
         )
     except FileNotFoundError as error:
@@ -97,7 +93,7 @@ def main(argv: list[str] | None = None) -> int:
         print(recovery_guidance(args.dist_dir, mismatch=True), file=sys.stderr)
         return 1
 
-    command_count = len(public_top_level_commands(cli))
+    command_count = len(public_top_level_commands())
     print(f"[+] {command_count} public CLI commands match {command_count} rendered pages.")
     return 0
 

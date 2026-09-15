@@ -6,7 +6,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-from apm_cli.cli import cli
 from scripts.check_cli_docs import registry_docs_mismatches
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -22,7 +21,7 @@ def _render_page(dist: Path, name: str) -> None:
 def _public_command_names(dist: Path) -> set[str]:
     cli_dir = dist / "reference" / "cli"
     cli_dir.mkdir(parents=True, exist_ok=True)
-    missing, orphan = registry_docs_mismatches(cli, dist)
+    missing, orphan = registry_docs_mismatches(dist)
     assert orphan == []
     return set(missing)
 

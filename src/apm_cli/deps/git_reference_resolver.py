@@ -59,6 +59,9 @@ if TYPE_CHECKING:
     from ..core.auth import AuthResolver
     from .transport_selection import TransportSelector
 
+_REMOTE_SHA_RE = re.compile(r"^[a-f0-9]{40}$", re.IGNORECASE)
+_INVALID_EXACT_REF_CHARS = frozenset(" ~^:?*[\\")
+
 
 # ---------------------------------------------------------------------------
 # Downloader collaboration contract
@@ -143,11 +146,140 @@ class GitReferenceResolver:
         include_heads: bool,
     ) -> list[RemoteRef]:
         """Enumerate remote tags, optionally including branch heads."""
-        host = self._host
-
         if dep_ref.is_artifactory():
             return []
 
+        ls_args = ("--tags", "--heads") if include_heads else ("--tags",)
+        output = self._remote_refs_output(
+            dep_ref,
+            options=ls_args,
+            patterns=(),
+            ref_kind="remote refs" if include_heads else "remote tags",
+        )
+        if not include_heads:
+            validate_ls_remote_tag_output(output)
+        refs = self._host._parse_ls_remote_output(output)
+        return self._host._sort_remote_refs(refs)
+
+    def resolve_remote_ref(
+        self,
+        dep_ref: DependencyReference,
+        ref: str,
+    ) -> ResolvedReference | None:
+        """Resolve one exact remote branch or tag without cloning.
+
+        Queries only the branch ref, tag ref, and peeled tag ref for ``ref``.
+        A branch/tag name collision, malformed output, or missing ref returns
+        ``None`` so the caller can preserve the legacy clone fallback.
+        """
+        if dep_ref.is_artifactory() or not self._is_valid_exact_ref_name(ref):
+            return None
+
+        branch_ref = f"refs/heads/{ref}"
+        tag_ref = f"refs/tags/{ref}"
+        peeled_tag_ref = f"refs/tags/{ref}^{{}}"
+        output = self._remote_refs_output(
+            dep_ref,
+            options=(),
+            patterns=(branch_ref, tag_ref, peeled_tag_ref),
+            ref_kind="remote ref",
+        )
+        return self._parse_exact_remote_ref_output(
+            dep_ref,
+            ref,
+            output,
+            branch_ref=branch_ref,
+            tag_ref=tag_ref,
+            peeled_tag_ref=peeled_tag_ref,
+        )
+
+    @staticmethod
+    def _is_valid_exact_ref_name(ref: str) -> bool:
+        """Return whether ``ref`` is safe to pass as an exact ls-remote pattern."""
+        if (
+            not ref
+            or ref == "@"
+            or ref.startswith(("/", "."))
+            or ref.endswith(("/", "."))
+            or ".." in ref
+            or "@{" in ref
+            or "//" in ref
+        ):
+            return False
+        return all(
+            32 <= ord(char) < 127 and char not in _INVALID_EXACT_REF_CHARS for char in ref
+        ) and all(
+            component
+            and not component.startswith(".")
+            and not component.casefold().endswith(".lock")
+            for component in ref.split("/")
+        )
+
+    @staticmethod
+    def _parse_exact_remote_ref_output(
+        dep_ref: DependencyReference,
+        ref: str,
+        output: str,
+        *,
+        branch_ref: str,
+        tag_ref: str,
+        peeled_tag_ref: str,
+    ) -> ResolvedReference | None:
+        """Strictly parse at most one exact branch or tag resolution."""
+        if not output:
+            return None
+
+        records: dict[str, str] = {}
+        expected_refs = {branch_ref, tag_ref, peeled_tag_ref}
+        for line in output.splitlines():
+            parts = line.split("\t")
+            if len(parts) != 2:
+                return None
+            sha, ref_name = parts
+            if (
+                sha != sha.strip()
+                or ref_name != ref_name.strip()
+                or not _REMOTE_SHA_RE.fullmatch(sha)
+                or sha == "0" * 40
+                or ref_name not in expected_refs
+                or ref_name in records
+            ):
+                return None
+            records[ref_name] = sha.lower()
+
+        branch_sha = records.get(branch_ref)
+        tag_sha = records.get(tag_ref)
+        peeled_tag_sha = records.get(peeled_tag_ref)
+        if branch_sha is not None and tag_sha is not None:
+            return None
+        if peeled_tag_sha is not None and tag_sha is None:
+            return None
+        if branch_sha is not None:
+            return ResolvedReference(
+                original_ref=str(dep_ref),
+                ref_type=GitReferenceType.BRANCH,
+                resolved_commit=branch_sha,
+                ref_name=ref,
+            )
+        if tag_sha is not None:
+            return ResolvedReference(
+                original_ref=str(dep_ref),
+                ref_type=GitReferenceType.TAG,
+                resolved_commit=peeled_tag_sha or tag_sha,
+                ref_name=ref,
+            )
+        return None
+
+    def _remote_refs_output(
+        self,
+        dep_ref: DependencyReference,
+        *,
+        options: tuple[str, ...],
+        patterns: tuple[str, ...],
+        ref_kind: str,
+    ) -> str:
+        """Run one authenticated, transport-aware ``git ls-remote`` operation."""
+        host = self._host
         is_ado = dep_ref.is_azure_devops()
         repo_url_base = dep_ref.repo_url
         candidate_uses_ssh = initial_transport_scheme(dep_ref, host._protocol_pref) == "ssh"
@@ -252,18 +384,17 @@ class GitReferenceResolver:
         from . import github_downloader as _gd
 
         g = _gd.git.cmd.Git()
-        ls_args = ("--tags", "--heads") if include_heads else ("--tags",)
 
         def _run_remote(url: str, env: dict[str, str]) -> str:
             if type(g).__module__.startswith("unittest.mock"):
-                return g.ls_remote(*ls_args, url, env=env)
+                return g.ls_remote(*options, url, *patterns, env=env)
             from ..utils.git_env import git_remote_refs
 
-            result = git_remote_refs(url, env=env, options=ls_args)
+            result = git_remote_refs(url, *patterns, env=env, options=options)
             if result.returncode != 0:
                 # auth-delegated: _primary_op and _bearer_op select this environment.
                 raise GitCommandError(
-                    [get_git_executable(), "ls-remote", *ls_args, url],
+                    [get_git_executable(), "ls-remote", *options, url, *patterns],
                     result.returncode,
                     stderr=result.stderr,
                 )
@@ -352,17 +483,13 @@ class GitReferenceResolver:
             ado_bearer_also_failed = False
 
         if outcome[0] == "ok":
-            if not include_heads:
-                validate_ls_remote_tag_output(outcome[1])
-            refs = host._parse_ls_remote_output(outcome[1])
-            return host._sort_remote_refs(refs)
+            return outcome[1]
 
         e = outcome[1]
         dep_host = dep_ref.host
         is_github = is_github_hostname(dep_host) if dep_host else True
         is_generic = not is_ado and not is_github
 
-        ref_kind = "remote refs" if include_heads else "remote tags"
         error_msg = f"Failed to list {ref_kind} for {repo_url_base}. "
         if public_github_https_first and not host.auth_resolver.is_public_github_auth_failure(e):
             error_msg += (

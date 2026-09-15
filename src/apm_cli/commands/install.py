@@ -226,7 +226,7 @@ APM_DEPS_AVAILABLE = False
 _APM_IMPORT_ERROR = None
 try:
     from ..deps.apm_resolver import APMDependencyResolver
-    from ..deps.lockfile import LockFile, get_lockfile_path, migrate_lockfile_if_needed
+    from ..deps.lockfile import get_lockfile_path, migrate_lockfile_if_needed
     from ..integration.mcp_integrator import (
         MCPIntegrator,  # noqa: F401 -- re-exported; tests patch commands.install.MCPIntegrator
     )
@@ -1833,7 +1833,10 @@ def _install_apm_packages(ctx, outcome):
     old_mcp_target_servers: builtins.dict = {}
     old_mcp_target_servers_present = True
     _lock_path = get_lockfile_path(ctx.apm_dir)
-    _existing_lock = LockFile.read(_lock_path)
+    from apm_cli.install.lockfile_snapshot import LockfileSnapshot
+
+    _lockfile_snapshot = LockfileSnapshot.load(_lock_path)
+    _existing_lock = _lockfile_snapshot.lockfile
     if _existing_lock:
         old_mcp_servers = builtins.set(_existing_lock.mcp_servers)
         old_mcp_configs = builtins.dict(_existing_lock.mcp_configs)
@@ -1898,6 +1901,7 @@ def _install_apm_packages(ctx, outcome):
                 refresh=ctx.refresh,
                 trust_bin=ctx.trust_bin,
                 transaction=ctx.transaction,
+                lockfile_snapshot=_lockfile_snapshot,
             )
             if not isinstance(install_result, InstallResult):
                 install_result = InstallResult(
@@ -1967,6 +1971,11 @@ def _install_apm_packages(ctx, outcome):
     from apm_cli.policy.install_preflight import PolicyBlockError
 
     try:
+        current_lockfile_snapshot = (
+            install_result.lockfile_snapshot
+            if install_result is not None and install_result.lockfile_snapshot is not None
+            else _lockfile_snapshot
+        )
         service_result = run_service_integrations(
             ctx,
             apm_package=apm_package,
@@ -1981,6 +1990,7 @@ def _install_apm_packages(ctx, outcome):
             diagnostics=apm_diagnostics,
             explicit_target=ctx.target or ctx.runtime,
             target_decision=ctx.target_decision,
+            lockfile_snapshot=current_lockfile_snapshot,
         )
     except PolicyBlockError:
         logger.error(
@@ -2072,6 +2082,7 @@ def _install_apm_dependencies(
     from apm_cli.install.request import InstallRequest
     from apm_cli.install.service import InstallService
 
+    lockfile_snapshot = options.pop("lockfile_snapshot", None)
     request = InstallRequest(
         apm_package=apm_package,
         update_refs=update_refs,
@@ -2079,4 +2090,4 @@ def _install_apm_dependencies(
         only_packages=only_packages,
         **options,
     )
-    return InstallService().run(request)
+    return InstallService().run(request, lockfile_snapshot=lockfile_snapshot)

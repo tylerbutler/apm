@@ -862,17 +862,23 @@ def reconcile_project_deployed_state(
     lock_root: Path | None = None,
     user_scope: bool = False,
     verbose: bool = False,
+    lockfile_snapshot=None,
 ) -> bool:
     """Reconcile and persist a project's deployed state after a command."""
-    from apm_cli.deps.lockfile import LockFile, get_lockfile_path
+    import copy
+
+    from apm_cli.deps.lockfile import get_lockfile_path
+    from apm_cli.install.lockfile_snapshot import LockfileSnapshot
     from apm_cli.integration.targets import active_targets, active_targets_user_scope
     from apm_cli.utils.diagnostics import DiagnosticCollector
 
     deploy_root = deploy_root or manifest_root
     lock_path = get_lockfile_path(lock_root or manifest_root)
-    lockfile = LockFile.read(lock_path)
+    snapshot = LockfileSnapshot.resolve(lock_path, lockfile_snapshot)
+    lockfile = snapshot.lockfile
     if lockfile is None:
         return False
+    baseline = copy.deepcopy(lockfile)
     diagnostics = DiagnosticCollector(verbose=verbose)
     declared = declared_target_profiles(
         manifest_root,
@@ -901,5 +907,6 @@ def reconcile_project_deployed_state(
         user_scope=user_scope,
     )
     if changed:
-        lockfile.save(lock_path)
+        lockfile.save(lock_path, existing_lockfile=baseline)
+        snapshot.replace(lockfile)
     return changed

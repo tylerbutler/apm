@@ -13,6 +13,7 @@ if TYPE_CHECKING:
     from apm_cli.core.scope import InstallScope
     from apm_cli.core.target_detection import EffectiveTargetDecision
     from apm_cli.deps.lockfile import LockFile
+    from apm_cli.install.lockfile_snapshot import LockfileSnapshot
 
 
 class ServiceCommandContext(Protocol):
@@ -56,6 +57,7 @@ def run_service_integrations(
     diagnostics: Any,
     explicit_target: str | list[str] | None,
     target_decision: EffectiveTargetDecision | None,
+    lockfile_snapshot: LockfileSnapshot | None = None,
 ) -> ServiceIntegrationResult:
     """Resolve once, then reconcile package-declared MCP and LSP services."""
     from apm_cli.core.scope import InstallScope, get_modules_dir
@@ -106,6 +108,7 @@ def run_service_integrations(
         explicit_target=target_decision.value if target_decision else None,
         target_decision=target_decision,
         scope=ctx.scope,
+        lockfile_snapshot=lockfile_snapshot,
     )
     lsp_count = run_lsp_integration(
         apm_package=apm_package,
@@ -130,5 +133,6 @@ def run_service_integrations(
         effective_allow_resolved=ctx.exec_allow_resolved,
         force=ctx.force,
         no_policy=ctx.no_policy,
+        lockfile_snapshot=lockfile_snapshot,
     )
     return ServiceIntegrationResult(mcp_count, lsp_count, target_decision)

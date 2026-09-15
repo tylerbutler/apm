@@ -15,7 +15,7 @@ Two responsibilities:
    canonical security chokepoint
    ``apm_cli.integration.cleanup.remove_stale_deployed_files`` (PR #762).
 
-2. **Lockfile persistence** -- read-modify-write the lockfile to persist
+2. **Lockfile persistence** -- update the run-scoped lockfile snapshot to persist
    ``local_deployed_files`` and per-file content hashes.  Runs after the
    dep lockfile phase has already written dependency data; this phase
    simply augments the on-disk lockfile with the local fields.
@@ -68,12 +68,21 @@ def run(ctx: InstallContext) -> None:
     # using only the active targets can reject an inactive target's valid path
     # as unmanaged and reintroduce the ghost that the canonical owner removed.
     # ------------------------------------------------------------------
+    import copy
+
     from apm_cli.deps.lockfile import LockFile as _LF
     from apm_cli.deps.lockfile import get_lockfile_path as _get_lfp
+    from apm_cli.install.lockfile_snapshot import LockfileSnapshot
     from apm_cli.install.phases.lockfile import compute_deployed_hashes as _hash_deployed
 
     _lock_path = _get_lfp(ctx.apm_dir)
-    _persist_lock = _LF.read(_lock_path) or _LF()
+    _snapshot = LockfileSnapshot.resolve(
+        _lock_path,
+        getattr(ctx, "lockfile_snapshot", None),
+    )
+    ctx.lockfile_snapshot = _snapshot
+    _persist_lock = _snapshot.lockfile or _LF()
+    _existing_for_cmp = copy.deepcopy(_snapshot.lockfile)
     from apm_cli.core.deployment_ledger import DeploymentLedgerCodec
 
     _prior_ledger = DeploymentLedgerCodec.from_lockfile(_persist_lock)
@@ -132,6 +141,6 @@ def run(ctx: InstallContext) -> None:
         noun = "entry" if _ghost_count == 1 else "entries"
         logger.info(f"Repaired {_ghost_count} inactive-target local lockfile {noun}")
     # Only write if changed.
-    _existing_for_cmp = _LF.read(_lock_path)
     if not _existing_for_cmp or not _persist_lock.is_semantically_equivalent(_existing_for_cmp):
-        _persist_lock.save(_lock_path)
+        _persist_lock.save(_lock_path, existing_lockfile=_existing_for_cmp)
+        _snapshot.replace(_persist_lock)

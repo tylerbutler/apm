@@ -191,17 +191,27 @@ def _resolve_and_stage_revision_pin_updates(
     return resolution
 
 
-def _annotate_lockfile_revision_tags(project_root: Path, updates: list[RevisionPinUpdate]) -> None:
+def _annotate_lockfile_revision_tags(
+    project_root: Path,
+    updates: list[RevisionPinUpdate],
+    *,
+    lockfile_snapshot=None,
+) -> None:
     """Record resolved annotated tag names for updated SHA pins in the lockfile."""
     if not updates:
         return
-    from apm_cli.deps.lockfile import LockFile, get_lockfile_path
+    import copy
+
+    from apm_cli.deps.lockfile import get_lockfile_path
+    from apm_cli.install.lockfile_snapshot import LockfileSnapshot
 
     lockfile_path = get_lockfile_path(project_root)
-    lockfile = LockFile.read(lockfile_path)
+    snapshot = LockfileSnapshot.resolve(lockfile_path, lockfile_snapshot)
+    lockfile = snapshot.lockfile
     if lockfile is None:
         raise RuntimeError("Could not record revision-pin tags: apm.lock.yaml was not written")
 
+    baseline = copy.deepcopy(lockfile)
     changed = False
     for update in updates:
         locked = lockfile.get_dependency(update.dep_key)
@@ -218,7 +228,8 @@ def _annotate_lockfile_revision_tags(project_root: Path, updates: list[RevisionP
             locked.resolved_tag = update.tag
             changed = True
     if changed:
-        lockfile.save(lockfile_path)
+        lockfile.save(lockfile_path, existing_lockfile=baseline)
+        snapshot.replace(lockfile)
 
 
 def _run_mcp_lsp_integration(
@@ -234,6 +245,7 @@ def _run_mcp_lsp_integration(
     effective_allow_executables: dict[str, dict[str, bool]] | None = None,
     effective_allow_resolved: bool = False,
     force: bool = False,
+    lockfile_snapshot=None,
 ) -> None:
     """Reconcile MCP and LSP servers against the current apm.yml.
 
@@ -292,6 +304,7 @@ def _run_mcp_lsp_integration(
             explicit_target=effective_target,
             target_decision=target_decision,
             scope=scope,
+            lockfile_snapshot=lockfile_snapshot,
         )
     except PolicyBlockError:
         logger.error(
@@ -317,6 +330,7 @@ def _run_mcp_lsp_integration(
         effective_allow_executables=effective_allow_executables,
         effective_allow_resolved=effective_allow_resolved,
         force=force,
+        lockfile_snapshot=lockfile_snapshot,
     )
 
 
@@ -336,11 +350,14 @@ def _handle_service_only_update(
 
     from apm_cli.core.scope import InstallScope, get_apm_dir, get_deploy_root
     from apm_cli.core.target_detection import resolve_package_target_decision
-    from apm_cli.deps.lockfile import LockFile, get_lockfile_path
+    from apm_cli.deps.lockfile import get_lockfile_path
 
     apm_dir = get_apm_dir(scope)
     lock_path = get_lockfile_path(apm_dir)
-    existing_lock = LockFile.read(lock_path)
+    from apm_cli.install.lockfile_snapshot import LockfileSnapshot
+
+    lockfile_snapshot = LockfileSnapshot.load(lock_path)
+    existing_lock = lockfile_snapshot.lockfile
     has_services = bool(
         apm_package.get_all_mcp_dependencies()
         or apm_package.get_lsp_dependencies()
@@ -371,6 +388,7 @@ def _handle_service_only_update(
             logger=logger,
             verbose=verbose,
             force=force,
+            lockfile_snapshot=lockfile_snapshot,
         )
     except RequiredIntegrationError as exc:
         logger.error(str(exc))
@@ -777,13 +795,16 @@ def _run_dep_update_locked(
     # is the correct "old" baseline for stale-server detection below. LSP
     # fields have no such carry-forward, so they must be captured here too.
     from apm_cli.core.scope import get_apm_dir, get_deploy_root, get_modules_dir
-    from apm_cli.deps.lockfile import LockFile, get_lockfile_path
+    from apm_cli.deps.lockfile import get_lockfile_path
 
     _apm_dir = get_apm_dir(scope)
     _modules_dir = get_modules_dir(scope)
     _mcp_lsp_project_root = get_deploy_root(scope)
     _lock_path = get_lockfile_path(_apm_dir)
-    _existing_lock = LockFile.read(_lock_path)
+    from apm_cli.install.lockfile_snapshot import LockfileSnapshot
+
+    _lockfile_snapshot = LockfileSnapshot.load(_lock_path)
+    _existing_lock = _lockfile_snapshot.lockfile
     _cache_rehydration_required = _module_cache_needs_rehydration(
         _existing_lock,
         _modules_dir,
@@ -810,6 +831,7 @@ def _run_dep_update_locked(
             logger=logger,
             plan_callback=_plan_callback,
             target=target,
+            lockfile_snapshot=_lockfile_snapshot,
         )
     except FrozenInstallError as e:
         _rich_error(str(e))
@@ -850,6 +872,7 @@ def _run_dep_update_locked(
         return
 
     target_decision = getattr(result, "target_decision", None)
+    current_lockfile_snapshot = result.lockfile_snapshot or _lockfile_snapshot
     reconcile_noop = not dry_run and not plan.has_changes and not revision_pin_updates
     if plan_state.proceeded or reconcile_noop:
         from apm_cli.install.manifest_reconcile import reconcile_project_deployed_state
@@ -861,12 +884,17 @@ def _run_dep_update_locked(
             lock_root=_apm_dir,
             user_scope=scope is InstallScope.USER,
             verbose=verbose,
+            lockfile_snapshot=current_lockfile_snapshot,
         )
 
     if plan_state.proceeded:
         if revision_pin_updates:
             try:
-                _annotate_lockfile_revision_tags(Path.cwd(), revision_pin_updates)
+                _annotate_lockfile_revision_tags(
+                    Path.cwd(),
+                    revision_pin_updates,
+                    lockfile_snapshot=current_lockfile_snapshot,
+                )
             except Exception as e:
                 _rich_error(f"Failed to record revision-pin tags in apm.lock.yaml: {e}")
                 sys.exit(1)
@@ -885,6 +913,7 @@ def _run_dep_update_locked(
                 effective_allow_executables=getattr(result, "exec_allow_map", None),
                 effective_allow_resolved=getattr(result, "exec_allow_resolved", False),
                 force=force,
+                lockfile_snapshot=current_lockfile_snapshot,
             )
         except RequiredIntegrationError as e:
             logger.error(str(e))

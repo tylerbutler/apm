@@ -308,8 +308,7 @@ class TestSkillIntegratorInit:
     def test_constructor_no_args(self) -> None:
         integrator = SkillIntegrator()
         assert integrator is not None
-        assert hasattr(integrator, "_native_skill_session_owners")
-        assert integrator._native_skill_session_owners == {}
+        assert integrator._ownership_index is None
 
 
 class TestSkillIntegratorFindFiles:

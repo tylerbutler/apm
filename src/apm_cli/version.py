@@ -2,13 +2,16 @@
 
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
-from apm_cli.utils.git_env import get_git_executable
+if TYPE_CHECKING:
+    import click
 
 # Build-time constants (will be injected during build)
 # This avoids TOML parsing overhead during runtime
 __BUILD_VERSION__ = None
 __BUILD_SHA__ = None
+_console: Any | None = None
 
 
 def get_version() -> str:
@@ -83,6 +86,8 @@ def get_build_sha() -> str:
         import subprocess
 
         try:
+            from apm_cli.utils.git_env import get_git_executable
+
             repo_root = Path(__file__).parent.parent.parent
             result = subprocess.run(
                 [get_git_executable(), "rev-parse", "--short", "HEAD"],
@@ -97,6 +102,92 @@ def get_build_sha() -> str:
         except Exception:
             pass
     return ""
+
+
+def _get_console() -> Any | None:
+    """Return a lazily created Rich console for version output."""
+    global _console
+    if _console is not None:
+        return _console
+    try:
+        from rich.console import Console
+
+        _console = Console()
+    except ImportError:
+        return None
+    return _console
+
+
+def _fallback_title() -> tuple[str, str]:
+    """Return legacy title and reset styles for non-Rich environments."""
+    try:
+        from colorama import Fore, Style
+        from colorama import init as colorama_init
+
+        colorama_init(autoreset=True)
+        return Fore.CYAN + Style.BRIGHT, Style.RESET_ALL
+    except ImportError:
+        return "", ""
+
+
+def _echo_dim(message: str) -> None:
+    """Render one dim version-detail line with a plain Click fallback."""
+    import click
+
+    console = _get_console()
+    if console is not None:
+        console.print(message, style="dim")
+    else:
+        click.echo(message)
+
+
+def print_version(
+    ctx: "click.Context",
+    param: "click.Parameter | None",
+    value: bool,
+) -> None:
+    """Print the source or frozen version contract and exit."""
+    if not value or ctx.resilient_parsing:
+        return
+
+    import click
+
+    version_str = get_version()
+    sha = get_build_sha()
+    if sha:
+        version_str += f" ({sha})"
+
+    console = _get_console()
+    if console is not None:
+        try:
+            console.print(
+                f"[bold cyan]Agent Package Manager (APM) CLI[/bold cyan] version {version_str}"
+            )
+        except Exception:
+            title, reset = _fallback_title()
+            click.echo(f"{title}Agent Package Manager (APM) CLI{reset} version {version_str}")
+    else:
+        title, reset = _fallback_title()
+        click.echo(f"{title}Agent Package Manager (APM) CLI{reset} version {version_str}")
+
+    try:
+        from apm_cli.core.experimental import is_enabled
+
+        if is_enabled("verbose_version"):
+            import platform
+
+            python_ver = platform.python_version()
+            plat = f"{sys.platform}-{platform.machine()}"
+            install_path = str(Path(__file__).resolve().parent)
+
+            _echo_dim(f"  {'Python:':<14}{python_ver}")
+            _echo_dim(f"  {'Platform:':<14}{plat}")
+            _echo_dim(f"  {'Install path:':<14}{install_path}")
+    except Exception:
+        # Experimental metadata must never break the baseline version contract.
+        pass
+
+    ctx.exit()
 
 
 # For backward compatibility

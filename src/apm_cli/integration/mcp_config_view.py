@@ -431,13 +431,22 @@ def _collect_transitive_compat(
     *,
     logger: _McpViewLogger | None,
     diagnostics: DiagnosticCollector | None,
+    lockfile_snapshot=None,
 ) -> list[MCPDependency]:
     """Implement the legacy MCPIntegrator traversal through this owner."""
-    from apm_cli.deps.lockfile import LockFile
-
     if not modules_root.exists():
         return []
-    lockfile = LockFile.read(lock_path) if lock_path is not None and lock_path.exists() else None
+    if lockfile_snapshot is not None:
+        effective_path = lock_path or lockfile_snapshot.path
+        from apm_cli.install.lockfile_snapshot import LockfileSnapshot
+
+        lockfile = LockfileSnapshot.resolve(effective_path, lockfile_snapshot).lockfile
+    elif lock_path is not None:
+        from apm_cli.install.lockfile_snapshot import LockfileSnapshot
+
+        lockfile = LockfileSnapshot.load(lock_path).lockfile
+    else:
+        lockfile = None
     if lockfile is None:
         return _collect_unlocked_compat(
             modules_root,

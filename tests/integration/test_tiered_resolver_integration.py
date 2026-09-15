@@ -17,7 +17,9 @@ from apm_cli.deps.tiered_ref_resolver import (
     L0PerRunCache,
     L3LegacyClone,
     PerRunRefCache,
+    RefFreshnessPolicy,
     TieredRefResolver,
+    build_tiered_ref_resolver,
 )
 from apm_cli.models.dependency.reference import DependencyReference
 from apm_cli.models.dependency.types import GitReferenceType, ResolvedReference
@@ -138,3 +140,50 @@ def test_tiered_resolver_disabled_via_env(monkeypatch):
     downloader = GitHubPackageDownloader.__new__(GitHubPackageDownloader)
     downloader._refs = MagicMock()
     assert build_tiered_ref_resolver(downloader=downloader) is None
+
+
+def test_current_remote_exact_lookup_collapses_unique_refs_without_clone(monkeypatch):
+    """Current-remote resolution performs one exact lookup per normalized key."""
+    monkeypatch.setenv("APM_TIERED_RESOLVER", "1")
+    refs = MagicMock()
+    refs.resolve_commit_sha_for_ref.return_value = None
+
+    def resolve_remote(dep_ref, ref):
+        ref_type = GitReferenceType.TAG if ref.startswith("v") else GitReferenceType.BRANCH
+        return ResolvedReference(
+            original_ref=str(dep_ref),
+            ref_type=ref_type,
+            resolved_commit=SHA_FMT.format(abs(hash((dep_ref.repo_url, ref))) % 10000),
+            ref_name=ref,
+        )
+
+    refs.resolve_remote_ref.side_effect = resolve_remote
+    refs.resolve.side_effect = AssertionError("legacy clone should not run")
+    downloader = MagicMock()
+    downloader._refs = refs
+    resolver = build_tiered_ref_resolver(
+        downloader=downloader,
+        freshness_policy=RefFreshnessPolicy.CURRENT_REMOTE,
+    )
+    assert isinstance(resolver, TieredRefResolver)
+    deps = [
+        DependencyReference(repo_url=repo, reference=ref)
+        for repo, ref in [
+            ("awesome/copilot", "main"),
+            ("awesome/copilot", "main"),
+            ("awesome/copilot", "main"),
+            ("org/lib-a", "v1.0.0"),
+            ("org/lib-a", "v1.0.0"),
+            ("org/lib-b", "main"),
+        ]
+    ]
+
+    results = [resolver.resolve(dep) for dep in deps]
+
+    assert refs.resolve_commit_sha_for_ref.call_count == 3
+    assert refs.resolve_remote_ref.call_count == 3
+    refs.resolve.assert_not_called()
+    assert resolver.stats["remote_ref"] == 3
+    assert resolver.stats["per_run_cache"] == 3
+    assert results[3].ref_type is GitReferenceType.TAG
+    assert results[4].ref_type is GitReferenceType.TAG

@@ -231,6 +231,7 @@ hiddenimports = [
     'importlib_metadata',
 ]
 # Rich loads versioned cell-width tables dynamically; collect every installed version.
+hiddenimports.extend(collect_submodules('apm_cli.commands'))
 hiddenimports.extend(collect_submodules('rich._unicode_data'))
 
 # Modules to exclude to reduce binary size

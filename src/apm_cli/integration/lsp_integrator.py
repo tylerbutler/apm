@@ -7,6 +7,7 @@ pipeline owns collection, trust filtering, and lifecycle reconciliation.
 from __future__ import annotations
 
 import builtins
+import copy
 import json
 import logging
 from dataclasses import dataclass, replace
@@ -25,6 +26,7 @@ from apm_cli.utils.atomic_io import write_text_lf
 
 if TYPE_CHECKING:
     from apm_cli.core.target_detection import EffectiveTargetDecision
+    from apm_cli.install.lockfile_snapshot import LockfileSnapshot
 
 _log = logging.getLogger(__name__)
 
@@ -148,6 +150,7 @@ class LSPIntegrator:
         lock_path: Path | None = None,
         logger=None,
         diagnostics=None,
+        lockfile_snapshot: LockfileSnapshot | None = None,
     ) -> list:
         """Collect LSP dependencies from resolved APM packages listed in apm.lock.
 
@@ -165,7 +168,11 @@ class LSPIntegrator:
 
         from apm_cli.models.apm_package import APMPackage
 
-        resolved, _ = resolve_locked_apm_yml_sources(apm_modules_dir, lock_path)
+        resolved, _ = resolve_locked_apm_yml_sources(
+            apm_modules_dir,
+            lock_path,
+            lockfile_snapshot=lockfile_snapshot,
+        )
         if resolved is None:
             apm_yml_sources = [
                 (
@@ -722,14 +729,23 @@ class LSPIntegrator:
         lockfile_state: LockFile | None = None,
         persist: bool = True,
         fail_on_write_error: bool = False,
+        lockfile_snapshot: LockfileSnapshot | None = None,
     ) -> None:
         """Update the lockfile with the current set of APM-managed LSP servers."""
         if lock_path is None and persist:
             lock_path = get_lockfile_path(Path.cwd())
+        snapshot = lockfile_snapshot
+        if snapshot is None and lockfile_state is not None and lock_path is not None:
+            from apm_cli.install.lockfile_snapshot import LockfileSnapshot
+
+            snapshot = LockfileSnapshot.supplied(lock_path, lockfile_state)
+        if snapshot is None and lock_path is not None:
+            from apm_cli.install.lockfile_snapshot import LockfileSnapshot
+
+            snapshot = LockfileSnapshot.load(lock_path)
+        baseline = copy.deepcopy(snapshot.lockfile) if snapshot is not None else None
         try:
-            lockfile = lockfile_state
-            if lockfile is None and lock_path is not None:
-                lockfile = LockFile.read(lock_path) if lock_path.exists() else LockFile()
+            lockfile = snapshot.lockfile if snapshot is not None else lockfile_state
             if lockfile is None:
                 lockfile = LockFile()
             lockfile.lsp_servers = sorted(lsp_server_names)
@@ -749,8 +765,14 @@ class LSPIntegrator:
                     },
                 )
             if persist and lock_path is not None:
-                lockfile.save(lock_path)
+                if baseline is not None and lockfile.is_semantically_equivalent(baseline):
+                    return
+                lockfile.save(lock_path, existing_lockfile=baseline)
+            if snapshot is not None:
+                snapshot.replace(lockfile)
         except Exception as exc:
+            if snapshot is not None:
+                snapshot.replace(baseline)
             _log.debug(
                 "Failed to update LSP servers in lockfile at %s",
                 lock_path,

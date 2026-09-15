@@ -7,8 +7,10 @@ from __future__ import annotations
 
 import builtins
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from apm_cli.deps.lockfile import LockFile
+if TYPE_CHECKING:
+    from apm_cli.install.lockfile_snapshot import LockfileSnapshot
 
 
 def deduplicate_deps(deps: list) -> list:
@@ -40,6 +42,8 @@ def deduplicate_deps(deps: list) -> list:
 def resolve_locked_apm_yml_sources(
     apm_modules_dir: Path,
     lock_path: Path | None,
+    *,
+    lockfile_snapshot: LockfileSnapshot | None = None,
 ) -> tuple[list[tuple[Path, object]] | None, builtins.set]:
     """Resolve package manifest paths and dependency records from the lockfile.
 
@@ -51,26 +55,34 @@ def resolve_locked_apm_yml_sources(
     locked_sources: dict[Path, object] | None = None
     direct_paths: builtins.set = builtins.set()
 
-    if lock_path and lock_path.exists():
-        lockfile = LockFile.read(lock_path)
-        if lockfile is not None:
-            locked_sources = {}
-            for dep in lockfile.get_package_dependencies():
-                if dep.repo_url:
-                    package_root = dep.to_dependency_ref().get_install_path(apm_modules_dir)
-                    yml = package_root / "apm.yml"
-                    if yml.is_symlink():
-                        raise ValueError(f"Locked package manifest must not be a symlink: {yml}")
-                    resolved_yml = yml.resolve()
-                    try:
-                        resolved_yml.relative_to(package_root.resolve())
-                    except ValueError as exc:
-                        raise ValueError(
-                            f"Locked package manifest escapes its package root: {yml}"
-                        ) from exc
-                    locked_sources[resolved_yml] = dep
-                    if dep.depth == 1:
-                        direct_paths.add(resolved_yml)
+    lockfile = None
+    if lockfile_snapshot is not None:
+        effective_path = lock_path or lockfile_snapshot.path
+        from apm_cli.install.lockfile_snapshot import LockfileSnapshot
+
+        lockfile = LockfileSnapshot.resolve(effective_path, lockfile_snapshot).lockfile
+    elif lock_path:
+        from apm_cli.install.lockfile_snapshot import LockfileSnapshot
+
+        lockfile = LockfileSnapshot.load(lock_path).lockfile
+    if lockfile is not None:
+        locked_sources = {}
+        for dep in lockfile.get_package_dependencies():
+            if dep.repo_url:
+                package_root = dep.to_dependency_ref().get_install_path(apm_modules_dir)
+                yml = package_root / "apm.yml"
+                if yml.is_symlink():
+                    raise ValueError(f"Locked package manifest must not be a symlink: {yml}")
+                resolved_yml = yml.resolve()
+                try:
+                    resolved_yml.relative_to(package_root.resolve())
+                except ValueError as exc:
+                    raise ValueError(
+                        f"Locked package manifest escapes its package root: {yml}"
+                    ) from exc
+                locked_sources[resolved_yml] = dep
+                if dep.depth == 1:
+                    direct_paths.add(resolved_yml)
 
     if locked_sources is not None:
         resolved = [
@@ -84,9 +96,15 @@ def resolve_locked_apm_yml_sources(
 def resolve_locked_apm_yml_paths(
     apm_modules_dir: Path,
     lock_path: Path | None,
+    *,
+    lockfile_snapshot: LockfileSnapshot | None = None,
 ) -> tuple[list[Path] | None, builtins.set]:
     """Resolve manifest paths while preserving the legacy path-only API."""
-    sources, direct_paths = resolve_locked_apm_yml_sources(apm_modules_dir, lock_path)
+    sources, direct_paths = resolve_locked_apm_yml_sources(
+        apm_modules_dir,
+        lock_path,
+        lockfile_snapshot=lockfile_snapshot,
+    )
     if sources is None:
         return None, direct_paths
     return [path for path, _dependency in sources], direct_paths

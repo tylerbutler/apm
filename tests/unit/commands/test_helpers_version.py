@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import re
 from typing import Any
-from unittest.mock import patch
 
 import pytest
 from click.testing import CliRunner
@@ -50,13 +49,13 @@ def _isolate_config(tmp_path, monkeypatch) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _reset_helpers_console(monkeypatch) -> None:
-    """Reset the cached Rich console in _helpers so it is recreated fresh
+def _reset_version_console(monkeypatch) -> None:
+    """Reset the cached Rich console in version so it is recreated fresh
     inside each CliRunner invocation (pointing at the captured stdout).
     """
-    import apm_cli.commands._helpers as _h
+    from apm_cli import version
 
-    monkeypatch.setattr(_h, "_console", None)
+    monkeypatch.setattr(version, "_console", None)
 
 
 # ---------------------------------------------------------------------------
@@ -68,8 +67,7 @@ def _invoke_version(runner: CliRunner) -> Any:
     """Invoke `apm --version` with update-check and experimental imports isolated."""
     from apm_cli.cli import cli
 
-    with patch("apm_cli.commands._helpers._check_and_notify_updates"):
-        return runner.invoke(cli, ["--version"])
+    return runner.invoke(cli, ["--version"])
 
 
 # ---------------------------------------------------------------------------

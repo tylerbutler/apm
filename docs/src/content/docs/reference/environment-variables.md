@@ -128,7 +128,7 @@ These variables exist in the codebase but are not part of the documented contrac
 | Variable | Purpose | Default | Notes |
 |---|---|---|---|
 | `APM_RESOLVE_PARALLEL` | Tunes parallelism in the dependency resolver. | implementation default | Subject to change. |
-| `APM_TIERED_RESOLVER` | Set to `0`/`false`/`no`/`off` to disable the tiered git-ref resolver (per-run cache + commits API + bare `rev-parse` + legacy clone) and force every `install`/`update`/`outdated` ref resolution through the legacy shallow-clone path. Emergency rollback for #1369. | `1` (on) | Subject to change. Removal expected once the tiered stack has soaked through a release. |
+| `APM_TIERED_RESOLVER` | Set to `0`/`false`/`no`/`off` to disable the tiered git-ref resolver (per-run cache + commits API + typed bare `rev-parse` or exact remote-ref lookup + legacy clone) and force every `install`/`update`/`outdated` ref resolution through the legacy shallow-clone path. Emergency rollback for #1369. | `1` (on) | Subject to change. Removal expected once the tiered stack has soaked through a release. |
 | `APM_LEGACY_SKILL_PATHS` | Toggles legacy skill-path layout in integration targets. | unset | Compatibility shim; will be removed. |
 | `APM_NO_SCRIPTS` | Disables package lifecycle script execution. | unset | Internal safety/test switch; prefer executable trust policy in production. |
 | `APM_NON_INTERACTIVE` | Forces non-interactive behavior. | unset | Used by automation and tests. |

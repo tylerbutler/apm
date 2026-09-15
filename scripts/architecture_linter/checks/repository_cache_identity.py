@@ -129,7 +129,7 @@ RESOLVE_KEY_MESSAGE = (
 SEED_MISSING_MESSAGE = f"{RESOLVER_CLASS}.{SEED_METHOD} is missing"
 SEED_DUPLICATE_MESSAGE = f"{RESOLVER_CLASS}.{SEED_METHOD} has duplicate definitions"
 SEED_PUT_MESSAGE = (
-    f"lockfile seed must call _cache.put({IDENTITY_FUNCTION}({_DEP_REF}), {_REF}, sha)"
+    f"lockfile seed must call _cache.put({IDENTITY_FUNCTION}({_DEP_REF}), {_REF}, resolution)"
 )
 
 # The complete vocabulary this analyzer can emit. Callers (and the mutation

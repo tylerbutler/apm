@@ -1,6 +1,6 @@
 """Network, ref-resolution, and runtime-safety transport analyzers.
 
-Ports the remaining four of the ten canonical owner decisions in
+Ports the network and ref-resolution canonical owner decisions in
 ``.apm/architecture/owners/transport-auth-platform.json``, plus the two
 non-owner transport-domain guards:
 
@@ -197,6 +197,67 @@ def _check_ref_freshness(provider: FactsProvider) -> tuple[Violation, ...]:
             _FRESHNESS_DUP,
             "Git ref freshness must route through RefFreshnessPolicy",
             exempt=True,
+        )
+    )
+    return tuple(findings)
+
+
+_RID_TARGETED_REMOTE_REF = "transport-platform-targeted-remote-ref-resolution"
+_GIT_REFERENCE_RESOLVER = "src/apm_cli/deps/git_reference_resolver.py"
+_DIRECT_REMOTE_REF_EXECUTION = re.compile(r"git_remote_refs\(")
+
+
+def _check_targeted_remote_ref_resolution(
+    provider: FactsProvider,
+) -> tuple[Violation, ...]:
+    inv = frozenset(provider.inventory)
+    findings: list[Violation] = []
+
+    findings.extend(
+        _require_subs(
+            provider,
+            inv,
+            _RID_TARGETED_REMOTE_REF,
+            _GIT_REFERENCE_RESOLVER,
+            (
+                "def resolve_remote_ref(",
+                'branch_ref = f"refs/heads/{ref}"',
+                'tag_ref = f"refs/tags/{ref}"',
+                'peeled_tag_ref = f"refs/tags/{ref}^{{}}"',
+                "patterns=(branch_ref, tag_ref, peeled_tag_ref)",
+                "def _remote_refs_output(",
+                "result = git_remote_refs(url, *patterns, env=env, options=options)",
+                "if branch_sha is not None and tag_sha is not None:",
+                "resolved_commit=peeled_tag_sha or tag_sha",
+            ),
+            "GitReferenceResolver must own exact authenticated remote ref resolution",
+        )
+    )
+    findings.extend(
+        _require_subs(
+            provider,
+            inv,
+            _RID_TARGETED_REMOTE_REF,
+            _TIERED,
+            (
+                "class L2RemoteRef:",
+                "self._resolver.resolve_remote_ref(dep_ref, ref)",
+                "allow_syntax_type_hint=not freshness_policy.requires_remote",
+                "if freshness_policy.requires_remote:",
+                "tiers.append(L2RemoteRef(resolver=legacy_inner))",
+            ),
+            "TieredRefResolver must delegate current remote refs to GitReferenceResolver",
+        )
+    )
+    findings.extend(
+        _forbid_scan(
+            provider,
+            inv,
+            _RID_TARGETED_REMOTE_REF,
+            (_TIERED,),
+            _DIRECT_REMOTE_REF_EXECUTION,
+            "tiered_ref_resolver must not execute git ls-remote directly",
+            exempt=False,
         )
     )
     return tuple(findings)
@@ -442,6 +503,8 @@ def _check_artifactory_full_commit_sha(provider: FactsProvider) -> tuple[Violati
 
 _RID_TLS = "transport-platform-tls-trust-injection"
 
+_ROOT_CLI = "src/apm_cli/cli.py"
+
 
 _TLS_INJECT = re.compile(r"truststore\.inject_into_ssl\(")
 
@@ -456,15 +519,33 @@ _TLS_ALLOWED: frozenset[str] = frozenset(
 
 def _check_tls_trust_injection(provider: FactsProvider) -> tuple[Violation, ...]:
     inv = frozenset(provider.inventory)
-    return _forbid_scan(
-        provider,
-        inv,
-        _RID_TLS,
-        _src_python(provider, exclude=_TLS_ALLOWED),
-        _TLS_INJECT,
-        "TLS trust injection belongs to core/tls_trust.py and the child TLS bootstrap",
-        exempt=True,
+    findings = list(
+        _forbid_scan(
+            provider,
+            inv,
+            _RID_TLS,
+            _src_python(provider, exclude=_TLS_ALLOWED),
+            _TLS_INJECT,
+            "TLS trust injection belongs to core/tls_trust.py and the child TLS bootstrap",
+            exempt=True,
+        )
     )
+    findings.extend(
+        _require_subs(
+            provider,
+            inv,
+            _RID_TLS,
+            _ROOT_CLI,
+            (
+                "def _initialize_command_tls()",
+                "from apm_cli.core.tls_trust import",
+                "configure_process_tls_trust()",
+                "log_tls_trust_status()",
+            ),
+            "Root command lifecycle must initialize TLS through core/tls_trust.py",
+        )
+    )
+    return tuple(findings)
 
 
 _RID_RUNTIME_DEADLINE = "transport-platform-runtime-deadline-safety"
@@ -534,6 +615,13 @@ RULES: tuple[Rule, ...] = (
         guard_ids=(_RID_FRESHNESS,),
         description="Git ref freshness routes through RefFreshnessPolicy in tiered_ref_resolver.py.",
         check=_check_ref_freshness,
+    ),
+    Rule(
+        id=_RID_TARGETED_REMOTE_REF,
+        group=GROUP,
+        guard_ids=(_RID_TARGETED_REMOTE_REF,),
+        description="Exact remote ref lookup stays owned by GitReferenceResolver.",
+        check=_check_targeted_remote_ref_resolution,
     ),
     Rule(
         id=_RID_SEMVER,

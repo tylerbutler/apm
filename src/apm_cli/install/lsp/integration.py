@@ -219,6 +219,9 @@ def reconcile_lsp_after_uninstall(
     )
     apm_config = {"scripts": apm_package.scripts or {}}
     apm_config.update(canonical_package_target_config(apm_package))
+    from apm_cli.install.lockfile_snapshot import LockfileSnapshot
+
+    lockfile_snapshot = LockfileSnapshot.supplied(lock_path, lockfile)
     run_lsp_integration(
         apm_package=apm_package,
         apm_modules_path=modules_dir,
@@ -232,6 +235,7 @@ def reconcile_lsp_after_uninstall(
         target_decision=target_decision,
         fail_on_write_error=True,
         persist=False,
+        lockfile_snapshot=lockfile_snapshot,
     )
     after = (
         list(lockfile.lsp_servers),
@@ -266,6 +270,7 @@ def run_lsp_integration(  # noqa: PLR0913
     force: bool = False,
     no_policy: bool = False,
     persist: bool = True,
+    lockfile_snapshot=None,
 ) -> int:
     """Run LSP server integration after APM package installation.
 
@@ -298,7 +303,10 @@ def run_lsp_integration(  # noqa: PLR0913
     Returns:
         Number of LSP servers configured.
     """
+    from apm_cli.install.lockfile_snapshot import LockfileSnapshot
     from apm_cli.integration.lsp_integrator import LSPIntegrator
+
+    snapshot = LockfileSnapshot.resolve(lock_path, lockfile_snapshot)
 
     lsp_deps = apm_package.get_lsp_dependencies()
     if not isinstance(lsp_deps, list):
@@ -330,6 +338,7 @@ def run_lsp_integration(  # noqa: PLR0913
             apm_modules_path,
             lock_path,
             diagnostics=diagnostics,
+            lockfile_snapshot=snapshot,
         )
         if transitive_lsp:
             logger.verbose_detail(f"Collected {len(transitive_lsp)} transitive LSP dependency(ies)")
@@ -466,6 +475,7 @@ def run_lsp_integration(  # noqa: PLR0913
             lockfile_state=existing_lock if not persist else None,
             persist=persist,
             fail_on_write_error=fail_on_write_error,
+            lockfile_snapshot=snapshot,
         )
         if not lsp_deps:
             logger.verbose_detail("No LSP dependencies found in apm.yml")
@@ -481,6 +491,7 @@ def run_lsp_integration(  # noqa: PLR0913
             lockfile_state=existing_lock if not persist else None,
             persist=persist,
             fail_on_write_error=fail_on_write_error,
+            lockfile_snapshot=snapshot,
         )
 
     return lsp_count

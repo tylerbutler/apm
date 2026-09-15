@@ -171,16 +171,18 @@ def _load_lockfile(ctx: InstallContext) -> None:
     # ------------------------------------------------------------------
     # 1. Lockfile loading
     # ------------------------------------------------------------------
-    from apm_cli.deps.lockfile import LockFile, get_lockfile_path
+    from apm_cli.deps.lockfile import get_lockfile_path
+    from apm_cli.install.lockfile_snapshot import LockfileSnapshot
 
     lockfile_path = get_lockfile_path(ctx.apm_dir)
     ctx.lockfile_path = lockfile_path
-    existing_lockfile = None
+    snapshot = LockfileSnapshot.resolve(
+        lockfile_path,
+        getattr(ctx, "lockfile_snapshot", None),
+    )
+    ctx.lockfile_snapshot = snapshot
+    existing_lockfile = snapshot.lockfile
     lockfile_count = 0
-    if ctx.early_lockfile is not None:
-        existing_lockfile = ctx.early_lockfile
-    elif lockfile_path.exists():
-        existing_lockfile = LockFile.read(lockfile_path)
     if existing_lockfile and existing_lockfile.dependencies:
         lockfile_count = len(existing_lockfile.dependencies)
         if ctx.logger:
@@ -268,8 +270,9 @@ def _setup_downloader(ctx: InstallContext) -> None:
         downloader.install_logger = ctx.logger
 
     # #1369: tiered ref resolver. Collapses N redundant shallow clones
-    # for ref->SHA resolution into a per-run cache + cheap commits API
-    # + bare-rev-parse waterfall, falling back to the legacy clone path.
+    # for ref->SHA resolution into a per-run cache + cheap commits API,
+    # then a freshness-specific bare-cache or exact-remote-ref tier,
+    # falling back to the legacy clone path.
     # Wired AFTER persistent_git_cache so L2 can reach it. Reused by
     # every code path that calls downloader.resolve_git_reference():
     # install, update, outdated, publish.

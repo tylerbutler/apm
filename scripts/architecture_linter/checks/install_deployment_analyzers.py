@@ -38,6 +38,10 @@ from scripts.architecture_linter.checks.install_frozen_and_audit import (
     check_mcp_ownership_migration,
     check_uninstall_reachability,
 )
+from scripts.architecture_linter.checks.install_lockfile_snapshot import (
+    GUARD_LOCKFILE_SNAPSHOT,
+    check_run_scoped_lockfile_snapshot,
+)
 from scripts.architecture_linter.checks.install_lsp_plugin import (
     GUARD_EXECUTABLE_TRUST,
     GUARD_LSP_LIFECYCLE,
@@ -62,6 +66,10 @@ from scripts.architecture_linter.checks.install_request_and_source import (
     check_primitive_classification,
     check_request_defaults,
     check_source_plan,
+)
+from scripts.architecture_linter.checks.install_skill_ownership import (
+    GUARD_SKILL_OWNERSHIP,
+    check_skill_ownership_index,
 )
 from scripts.architecture_linter.checks.install_uninstall_and_resolution import (
     _GUARD_RESOLUTION_REPLACEMENT,
@@ -138,6 +146,11 @@ RULES: tuple[Rule, ...] = (
         check_base_integrator,
     ),
     _rule(
+        GUARD_SKILL_OWNERSHIP,
+        "Skill ownership derivation and same-run claims stay owned by SkillOwnershipIndex.",
+        check_skill_ownership_index,
+    ),
+    _rule(
         GUARD_EXECUTABLE_TRUST,
         "Install and update consume one effective executable-trust owner.",
         check_executable_trust_context,
@@ -166,6 +179,11 @@ RULES: tuple[Rule, ...] = (
         _GUARD_LIFECYCLE_SERIALIZATION,
         "Lifecycle mutators route through install/locking.py.",
         check_lifecycle_serialization,
+    ),
+    _rule(
+        GUARD_LOCKFILE_SNAPSHOT,
+        "Install orchestration reuses one parsed lockfile snapshot per run.",
+        check_run_scoped_lockfile_snapshot,
     ),
     _rule(
         _GUARD_UNINSTALL_SELECTION,

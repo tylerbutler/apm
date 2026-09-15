@@ -116,7 +116,7 @@ def _repo_root() -> Path:
     raise RuntimeError("Cannot locate repository root")
 
 
-def test_cli_bootstrap_injects_before_requests_import(tmp_path):
+def test_cli_import_does_not_initialize_tls(tmp_path):
     sentinel = tmp_path / "sentinel.txt"
     fake_truststore = tmp_path / "truststore.py"
     fake_truststore.write_text(
@@ -158,10 +158,63 @@ def test_cli_bootstrap_injects_before_requests_import(tmp_path):
     )
 
     assert result.returncode == 0, result.stderr
+    assert not sentinel.exists()
+
+
+def test_cli_command_initializes_tls_before_requests_import(tmp_path):
+    sentinel = tmp_path / "sentinel.txt"
+    fake_truststore = tmp_path / "truststore.py"
+    fake_truststore.write_text(
+        "\n".join(
+            [
+                "import os",
+                "import pathlib",
+                "import sys",
+                "",
+                "def inject_into_ssl():",
+                "    pathlib.Path(os.environ['TRUSTSTORE_SENTINEL']).write_text(",
+                "        'requests_imported=' + str('requests' in sys.modules),",
+                "        encoding='utf-8',",
+                "    )",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    env = os.environ.copy()
+    for name in (
+        _DISABLE_ENV_VAR,
+        "REQUESTS_CA_BUNDLE",
+        "CURL_CA_BUNDLE",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+    ):
+        env.pop(name, None)
+    env["PYTHONPATH"] = f"{tmp_path}{os.pathsep}{_repo_root() / 'src'}"
+    env["TRUSTSTORE_SENTINEL"] = str(sentinel)
+    env["APM_E2E_TESTS"] = "1"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from click.testing import CliRunner\n"
+            "from apm_cli.cli import cli\n"
+            "result = CliRunner().invoke(cli, ['list', '--help'])\n"
+            "raise SystemExit(result.exit_code)\n",
+        ],
+        cwd=_repo_root(),
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
     assert sentinel.read_text(encoding="utf-8") == "requests_imported=False"
 
 
-def test_cli_bootstrap_is_idempotent_across_import_and_main(tmp_path):
+def test_cli_command_tls_initialization_is_idempotent(tmp_path):
     sentinel = tmp_path / "sentinel.txt"
     fake_truststore = tmp_path / "truststore.py"
     fake_truststore.write_text(
@@ -195,11 +248,12 @@ def test_cli_bootstrap_is_idempotent_across_import_and_main(tmp_path):
         [
             sys.executable,
             "-c",
-            "import apm_cli.cli as c\n"
-            "def fake_cli(*, obj):\n"
-            "    return None\n"
-            "c.cli = fake_cli\n"
-            "c.main()\n",
+            "from click.testing import CliRunner\n"
+            "from apm_cli.cli import cli\n"
+            "runner = CliRunner()\n"
+            "first = runner.invoke(cli, ['list', '--help'])\n"
+            "second = runner.invoke(cli, ['list', '--help'])\n"
+            "raise SystemExit(first.exit_code or second.exit_code)\n",
         ],
         cwd=_repo_root(),
         env=env,

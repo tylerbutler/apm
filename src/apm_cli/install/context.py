@@ -21,6 +21,8 @@ if TYPE_CHECKING:
     from apm_cli.core.target_detection import EffectiveTargetDecision
     from apm_cli.deps.tiered_ref_resolver import RefFreshnessPolicy
     from apm_cli.install.helpers.ref_reuse import RefResolverCacheKey
+    from apm_cli.install.lockfile_snapshot import LockfileSnapshot
+    from apm_cli.integration.skill_ownership import SkillOwnershipIndex
     from apm_cli.security.executables import ExecTrustContext
 
 
@@ -104,12 +106,14 @@ class InstallContext:
     callback_downloaded: dict[str, Any] = field(default_factory=dict)  # resolve
     callback_failures: set[str] = field(default_factory=set)  # resolve
     transitive_failures: list[tuple[str, str]] = field(default_factory=list)  # resolve
+    lockfile_snapshot: LockfileSnapshot | None = None  # pipeline / lockfile
 
     # ------------------------------------------------------------------
     # Targets phase outputs
     # ------------------------------------------------------------------
     targets: list[Any] = field(default_factory=list)  # targets
     integrators: dict[str, Any] = field(default_factory=dict)  # targets
+    skill_ownership_index: SkillOwnershipIndex | None = None  # targets
 
     # ------------------------------------------------------------------
     # Download phase outputs

@@ -6,15 +6,18 @@ from collections.abc import Collection
 from pathlib import Path
 
 
-def write_empty_lockfile(apm_dir: Path) -> None:
+def write_empty_lockfile(apm_dir: Path, *, lockfile_snapshot=None) -> None:
     """Materialize an empty lockfile for a dependency-free ``apm lock``."""
     from apm_cli.deps.lockfile import LockFile, get_lockfile_path
+    from apm_cli.install.lockfile_snapshot import LockfileSnapshot
 
     lock_path = get_lockfile_path(apm_dir)
+    snapshot = LockfileSnapshot.resolve(lock_path, lockfile_snapshot)
     new_lock = LockFile.from_installed_packages([], None)
-    existing_lock = LockFile.read(lock_path) if lock_path.exists() else None
+    existing_lock = snapshot.lockfile
     if not (existing_lock and new_lock.is_semantically_equivalent(existing_lock)):
-        new_lock.save(lock_path)
+        new_lock.save(lock_path, existing_lockfile=existing_lock)
+        snapshot.replace(new_lock)
 
 
 def is_no_work_install(
@@ -25,10 +28,11 @@ def is_no_work_install(
     has_orphan_deps: bool,
     lockfile_only: bool,
     apm_dir: Path | None,
+    lockfile_snapshot=None,
 ) -> bool:
     """Return whether an install has no deployment, cleanup, or lock work."""
     if all_apm_deps or root_has_local_primitives or old_local_deployed or has_orphan_deps:
         return False
     if lockfile_only and apm_dir is not None:
-        write_empty_lockfile(apm_dir)
+        write_empty_lockfile(apm_dir, lockfile_snapshot=lockfile_snapshot)
     return True

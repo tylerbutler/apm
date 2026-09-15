@@ -188,6 +188,61 @@ class TestRunInstallPipelineDirectMcpDeps:
         assert seen_direct_mcp_deps == [prod_mcp, dev_mcp]
 
 
+class TestRunInstallPipelineLockfileReuse:
+    """The parsed lockfile is reused for managed-file collision state."""
+
+    def test_managed_files_does_not_reread_lockfile(self, tmp_path):
+        from apm_cli.deps.lockfile import LockedDependency, LockFile
+        from apm_cli.install.pipeline import run_install_pipeline
+
+        dependency = MagicMock()
+        pkg = MagicMock()
+        pkg.get_apm_dependencies.return_value = [dependency]
+        pkg.get_dev_apm_dependencies.return_value = []
+        pkg.get_all_mcp_dependencies.return_value = []
+        pkg.get_lsp_dependencies.return_value = []
+
+        existing = LockFile()
+        existing.add_dependency(
+            LockedDependency(
+                repo_url="owner/repo",
+                deployed_files=[".agents\\skills\\topic\\"],
+            )
+        )
+        captured_managed_files = None
+
+        def _phase_runner(name, _phase, ctx):
+            nonlocal captured_managed_files
+            if name == "resolve":
+                ctx.deps_to_install = [dependency]
+                ctx.existing_lockfile = existing
+                ctx.transitive_failures = []
+            elif name == "integrate":
+                captured_managed_files = ctx.managed_files
+                raise RuntimeError("stop after managed files")
+
+        with (
+            patch("apm_cli.core.scope.get_deploy_root", return_value=tmp_path),
+            patch("apm_cli.core.scope.get_source_root", return_value=tmp_path),
+            patch("apm_cli.core.scope.get_apm_dir", return_value=tmp_path),
+            patch(
+                "apm_cli.install.phases.local_content._project_has_root_primitives",
+                return_value=False,
+            ),
+            patch(
+                "apm_cli.deps.lockfile.LockFile.read",
+                return_value=existing,
+            ) as read_lockfile,
+            patch("apm_cli.install.pipeline._run_phase", side_effect=_phase_runner),
+            patch("apm_cli.deps.registry_proxy.RegistryConfig.from_env", return_value=None),
+            pytest.raises(RuntimeError, match="stop after managed files"),
+        ):
+            run_install_pipeline(pkg, target="copilot")
+
+        read_lockfile.assert_called_once()
+        assert captured_managed_files == {".agents/skills/topic/"}
+
+
 # ---------------------------------------------------------------------------
 # run_install_pipeline -- plan_callback
 # ---------------------------------------------------------------------------

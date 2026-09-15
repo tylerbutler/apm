@@ -11,6 +11,9 @@ Covers all branches of get_version() and get_build_sha():
 
 from __future__ import annotations
 
+import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -19,6 +22,8 @@ import pytest
 
 import apm_cli.version as version_mod
 from apm_cli.version import get_build_sha, get_version
+
+ROOT = Path(__file__).resolve().parents[2]
 
 # ---------------------------------------------------------------------------
 # get_version()
@@ -39,6 +44,41 @@ class TestGetVersionBuildConstant:
             with patch("importlib.metadata.version", return_value="0.0.1") as mock_meta:
                 assert get_version() == "9.9.9"
                 mock_meta.assert_not_called()
+
+
+def test_package_import_reuses_one_canonical_version_discovery() -> None:
+    """Package and version-module exports must share one metadata lookup."""
+    script = """
+import importlib.metadata
+import json
+
+calls = []
+original = importlib.metadata.version
+def traced(name):
+    calls.append(name)
+    return original(name)
+importlib.metadata.version = traced
+import apm_cli
+import apm_cli.version
+print(json.dumps({
+    "calls": calls,
+    "package_version": apm_cli.__version__,
+    "module_version": apm_cli.version.__version__,
+}))
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=ROOT,
+        env=dict(os.environ),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    result = json.loads(completed.stdout)
+    assert result["calls"].count("apm-cli") == 1
+    assert result["package_version"] == result["module_version"]
 
 
 class TestGetVersionImportlibMetadata:

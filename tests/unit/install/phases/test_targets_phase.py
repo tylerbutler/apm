@@ -81,6 +81,39 @@ def _make_ctx(
     return ctx
 
 
+def test_run_builds_and_injects_one_skill_ownership_index(
+    tmp_path: Path,
+    inject_config: Any,
+) -> None:
+    """Targets creates one run-scoped ownership index from the parsed lockfile."""
+    from apm_cli.deps.lockfile import LockFile
+    from apm_cli.install.phases.targets import run
+    from apm_cli.integration.skill_ownership import SkillOwnershipIndex
+
+    inject_config({})
+    ctx = _make_ctx(tmp_path, target_override="copilot")
+    ctx.existing_lockfile = LockFile()
+    ownership_index = SkillOwnershipIndex()
+
+    with (
+        patch(
+            "apm_cli.integration.targets.resolve_targets",
+            return_value=[KNOWN_TARGETS["copilot"]],
+        ),
+        patch("apm_cli.core.target_detection.detect_target"),
+        patch.object(
+            SkillOwnershipIndex,
+            "from_lockfile",
+            return_value=ownership_index,
+        ) as build_index,
+    ):
+        run(ctx)
+
+    build_index.assert_called_once_with(ctx.existing_lockfile)
+    assert ctx.skill_ownership_index is ownership_index
+    assert ctx.integrators["skill"]._ownership_index is ownership_index
+
+
 def test_grok_cloud_disabled_flag_emits_enable_hint(
     tmp_path: Path,
     inject_config: Any,

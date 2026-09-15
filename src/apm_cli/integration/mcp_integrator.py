@@ -393,6 +393,7 @@ class MCPIntegrator:
         trust_private: bool = False,
         logger=None,
         diagnostics=None,
+        lockfile_snapshot=None,
     ) -> list:
         """Compatibility delegate for canonical MCP source traversal."""
         return _collect_transitive_compat(
@@ -401,6 +402,7 @@ class MCPIntegrator:
             trust_private,
             logger=logger,
             diagnostics=diagnostics,
+            lockfile_snapshot=lockfile_snapshot,
         )
 
     # ------------------------------------------------------------------
@@ -962,6 +964,7 @@ class MCPIntegrator:
         mcp_config_provenance: builtins.dict | None = None,
         logger: CommandLogger | None = None,
         fail_on_write_error: bool = False,
+        lockfile_snapshot=None,
     ) -> None:
         """Update the lockfile with the current set of APM-managed MCP server names.
 
@@ -990,6 +993,9 @@ class MCPIntegrator:
         """
         if lock_path is None:
             lock_path = get_lockfile_path(Path.cwd())
+        from apm_cli.install.lockfile_snapshot import LockfileSnapshot
+
+        snapshot = LockfileSnapshot.resolve(lock_path, lockfile_snapshot)
         # A project whose apm.yml declares only MCP dependencies never enters
         # the APM install pipeline, so nothing else creates apm.lock.yaml --
         # yet `apm audit` counts MCP dependencies when deciding a lockfile is
@@ -998,17 +1004,15 @@ class MCPIntegrator:
         # is MCP state to record. Calls that clear the last server keep the
         # early return: they must not conjure a lockfile for a project that
         # never had one.
-        creating = not lock_path.exists()
+        creating = snapshot.lockfile is None
         if creating and not (mcp_server_names or mcp_configs):
             return
+        baseline = copy.deepcopy(snapshot.lockfile)
         try:
-            existing_lockfile = None if creating else LockFile.read(lock_path)
-            if existing_lockfile is None and not creating:
-                return
             lockfile = (
                 LockFile(apm_version=installed_apm_version())
-                if existing_lockfile is None
-                else copy.deepcopy(existing_lockfile)
+                if snapshot.lockfile is None
+                else snapshot.lockfile
             )
             lockfile.mcp_servers = sorted(mcp_server_names)
             if mcp_configs is not None:
@@ -1037,13 +1041,13 @@ class MCPIntegrator:
                     for name, pkg in lockfile.mcp_config_provenance.items()
                     if name in lockfile.mcp_configs
                 }
-            if existing_lockfile is not None and lockfile.is_semantically_equivalent(
-                existing_lockfile
-            ):
+            if baseline is not None and lockfile.is_semantically_equivalent(baseline):
                 _log.debug("MCP lockfile unchanged -- skipping write")
                 return
-            lockfile.save(lock_path, existing_lockfile=existing_lockfile)
+            lockfile.save(lock_path, existing_lockfile=baseline)
+            snapshot.replace(lockfile)
         except Exception as exc:
+            snapshot.replace(baseline)
             _log.debug(
                 "MCP lockfile persistence failed at %s",
                 lock_path,

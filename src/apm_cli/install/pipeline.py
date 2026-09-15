@@ -355,7 +355,7 @@ def _transactional_pipeline(run):
 
 
 @_transactional_pipeline
-def run_install_pipeline(  # noqa: C901, PLR0913, RUF100
+def run_install_pipeline(  # noqa: C901, PLR0913, PLR0915, RUF100
     apm_package: APMPackage,
     update_refs: bool = False,
     verbose: bool = False,
@@ -382,6 +382,7 @@ def run_install_pipeline(  # noqa: C901, PLR0913, RUF100
     lockfile_only: bool = False,
     trust_bin: bool | None = None,
     transaction: InstallTransaction | None = None,
+    lockfile_snapshot=None,
 ):
     """Install APM package dependencies.
 
@@ -416,7 +417,7 @@ def run_install_pipeline(  # noqa: C901, PLR0913, RUF100
     # already prevents callers from reaching here when deps are missing, but
     # keep the check as a defensive belt-and-suspenders measure.
     try:
-        from ..deps.lockfile import LockFile, get_lockfile_path
+        from ..deps.lockfile import get_lockfile_path
     except ImportError:
         raise RuntimeError("APM dependency system not available")  # noqa: B904
 
@@ -453,7 +454,11 @@ def run_install_pipeline(  # noqa: C901, PLR0913, RUF100
     # post-deps-local phase can run stale cleanup even when no current
     # local content exists (e.g. .apm/ was deleted but old files remain).
     _old_local_deployed: builtins.list = []
-    _early_lockfile = LockFile.read(get_lockfile_path(apm_dir)) if apm_dir else None
+    from .lockfile_snapshot import LockfileSnapshot
+
+    _lock_path = get_lockfile_path(apm_dir)
+    lockfile_snapshot = LockfileSnapshot.resolve(_lock_path, lockfile_snapshot)
+    _early_lockfile = lockfile_snapshot.lockfile
     if _early_lockfile:
         _old_local_deployed = builtins.list(_early_lockfile.local_deployed_files)
 
@@ -476,8 +481,9 @@ def run_install_pipeline(  # noqa: C901, PLR0913, RUF100
         has_orphan_deps=_has_orphan_deps,
         lockfile_only=lockfile_only,
         apm_dir=apm_dir,
+        lockfile_snapshot=lockfile_snapshot,
     ):
-        return InstallResult()
+        return InstallResult(lockfile_snapshot=lockfile_snapshot)
 
     if target_decision is None:
         from apm_cli.core.target_detection import resolve_effective_target_decision
@@ -528,6 +534,7 @@ def run_install_pipeline(  # noqa: C901, PLR0913, RUF100
         skill_subset=skill_subset,
         skill_subset_from_cli=skill_subset_from_cli,
         early_lockfile=_early_lockfile,
+        lockfile_snapshot=lockfile_snapshot,
         legacy_skill_paths=legacy_skill_paths,
         refresh=refresh,
         lockfile_only=lockfile_only,
@@ -563,7 +570,7 @@ def run_install_pipeline(  # noqa: C901, PLR0913, RUF100
                 lockfile_present=_early_lockfile is not None,
                 update_mode=update_refs,
             )
-        return InstallResult()
+        return InstallResult(lockfile_snapshot=lockfile_snapshot)
 
     # ------------------------------------------------------------------
     # Plan-gate checkpoint (#1203): show the user what install/update
@@ -593,6 +600,7 @@ def run_install_pipeline(  # noqa: C901, PLR0913, RUF100
             return InstallResult(
                 disposition=InstallDisposition.CANCELLED,
                 target_decision=target_decision,
+                lockfile_snapshot=lockfile_snapshot,
             )
 
     if target_decision.value is None and scope is InstallScope.PROJECT and not lockfile_only:
@@ -697,7 +705,6 @@ def run_install_pipeline(  # noqa: C901, PLR0913, RUF100
 
         # Collect installed packages for lockfile generation
         from ..deps.installed_package import InstalledPackage
-        from ..deps.lockfile import LockFile, get_lockfile_path
         from ..deps.registry_proxy import RegistryConfig
 
         installed_packages: builtins.list[InstalledPackage] = []
@@ -707,7 +714,7 @@ def run_install_pipeline(  # noqa: C901, PLR0913, RUF100
 
         # Build managed_files from existing lockfile for collision detection
         managed_files = builtins.set()
-        existing_lockfile = LockFile.read(get_lockfile_path(apm_dir)) if apm_dir else None
+        existing_lockfile = ctx.existing_lockfile
         if existing_lockfile:
             for dep in existing_lockfile.dependencies.values():
                 managed_files.update(dep.deployed_files)

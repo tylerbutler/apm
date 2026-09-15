@@ -4,18 +4,47 @@ from unittest.mock import patch
 
 import click
 from click.testing import CliRunner
+from click.utils import make_default_short_help
 
 from apm_cli.cli import cli
+from apm_cli.commands.registry import command_names, get_command_entry
 from apm_cli.output.script_formatters import ScriptExecutionFormatter
 
 
-def _walk_commands(group: click.Group, prefix: tuple[str, ...] = ()):
+def _walk_commands(
+    group: click.Group,
+    prefix: tuple[str, ...] = (),
+    parent: click.Context | None = None,
+):
     """Yield (path_tuple, command) for every command reachable under group."""
-    for name, cmd in group.commands.items():
+    ctx = click.Context(group, info_name=prefix[-1] if prefix else "cli", parent=parent)
+    for name in group.list_commands(ctx):
+        cmd = group.get_command(ctx, name)
+        assert cmd is not None
         path = (*prefix, name)
         yield path, cmd
         if isinstance(cmd, click.Group):
-            yield from _walk_commands(cmd, path)
+            yield from _walk_commands(cmd, path, ctx)
+
+
+def test_static_registry_matches_loaded_root_commands() -> None:
+    """Static help metadata and lazy command targets must describe the same CLI."""
+    ctx = click.Context(cli, info_name="cli")
+
+    assert tuple(cli.list_commands(ctx)) == command_names()
+    for name in command_names():
+        entry = get_command_entry(name)
+        command = cli.get_command(ctx, name)
+
+        assert entry is not None
+        assert command is not None
+        assert command.hidden is entry.hidden
+        expected_help = (
+            entry.short_help.strip()
+            if entry.short_help
+            else make_default_short_help(entry.help, 60)
+        )
+        assert command.get_short_help_str(60) == expected_help
 
 
 def test_every_registered_command_has_explicit_help():
@@ -44,6 +73,22 @@ def test_every_registered_command_has_explicit_help():
         "Commands missing explicit help= (would render blank under "
         "PyInstaller optimize=2): " + ", ".join(sorted(missing))
     )
+
+
+def test_every_registered_command_help_renders(monkeypatch) -> None:
+    """Every lazy top-level and nested command must retain a valid help path."""
+    monkeypatch.setattr("apm_cli.cli._initialize_command_tls", lambda: None)
+    monkeypatch.setattr("apm_cli.cli._check_and_notify_updates", lambda: None)
+    command_paths = [path for path, _command in _walk_commands(cli)]
+    runner = CliRunner()
+
+    failures: list[str] = []
+    for path in command_paths:
+        result = runner.invoke(cli, [*path, "--help"])
+        if result.exit_code != 0:
+            failures.append(f"{' '.join(path)}: {result.exception!r}")
+
+    assert failures == []
 
 
 def test_audit_help_describes_security_and_integrity_modes():

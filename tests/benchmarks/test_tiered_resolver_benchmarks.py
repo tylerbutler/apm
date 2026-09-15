@@ -24,7 +24,9 @@ from apm_cli.deps.tiered_ref_resolver import (
     L0PerRunCache,
     L3LegacyClone,
     PerRunRefCache,
+    RefFreshnessPolicy,
     TieredRefResolver,
+    build_tiered_ref_resolver,
 )
 from apm_cli.models.dependency.reference import DependencyReference
 from apm_cli.models.dependency.types import GitReferenceType, ResolvedReference
@@ -139,3 +141,45 @@ def test_speedup_ratio_meets_three_x_target():
         f"Expected >=2.5x speedup, got {speedup:.2f}x "
         f"(legacy={legacy_elapsed:.3f}s tiered={tiered_elapsed:.3f}s)"
     )
+
+
+@pytest.mark.benchmark
+def test_current_remote_exact_lookup_runs_once_per_normalized_url_ref():
+    """P1 guard: exact remote lookup replaces clones and keeps typed cache hits."""
+    refs = MagicMock()
+    refs.resolve_commit_sha_for_ref.return_value = None
+
+    def resolve_remote(dep_ref, ref):
+        ref_type = GitReferenceType.TAG if ref.startswith("v") else GitReferenceType.BRANCH
+        return ResolvedReference(
+            original_ref=str(dep_ref),
+            ref_type=ref_type,
+            resolved_commit="b" * 40,
+            ref_name=ref,
+        )
+
+    refs.resolve_remote_ref.side_effect = resolve_remote
+    refs.resolve.side_effect = AssertionError("legacy clone should not run")
+    downloader = MagicMock()
+    downloader._refs = refs
+    resolver = build_tiered_ref_resolver(
+        downloader=downloader,
+        freshness_policy=RefFreshnessPolicy.CURRENT_REMOTE,
+    )
+    assert isinstance(resolver, TieredRefResolver)
+    deps = [DependencyReference(repo_url=repo, reference=ref) for repo, ref in WORKLOAD]
+    deps[1] = DependencyReference(
+        repo_url="awesome/copilot",
+        host="github.com",
+        reference="main",
+    )
+
+    results = [resolver.resolve(dep) for dep in deps]
+
+    assert refs.resolve_commit_sha_for_ref.call_count == 3
+    assert refs.resolve_remote_ref.call_count == 3
+    refs.resolve.assert_not_called()
+    assert resolver.stats["remote_ref"] == 3
+    assert resolver.stats["per_run_cache"] == 6
+    assert results[5].ref_type is GitReferenceType.TAG
+    assert results[6].ref_type is GitReferenceType.TAG
