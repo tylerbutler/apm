@@ -627,10 +627,10 @@ MUTATIONS: tuple[MutationCase, ...] = (
     MutationCase(
         guard_id="onboarding-metadata-only",
         rule_id="onboarding-metadata-only",
-        path="src/apm_cli/adopt/manifest_edit.py",
-        old="    write_yaml_text_atomic(path, content)",
-        new="    path.write_text(content)",
-        intent="Onboarding bypasses the sole atomic consumer-manifest writer.",
+        path="src/apm_cli/adopt/discovery.py",
+        old="validate_apm_package(path, read_only=True)",
+        new="validate_apm_package(path, read_only=False)",
+        intent="Discovery allows package admission to mutate the source it is inventorying.",
     ),
     MutationCase(
         guard_id="registry-delegation-bootstrap-project-name",

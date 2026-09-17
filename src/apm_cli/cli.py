@@ -52,15 +52,18 @@ class _LazyCommandGroup(click.Group):
 
     def get_command(self, ctx: click.Context, cmd_name: str) -> click.Command | None:
         """Import and cache only the selected command."""
-        cached = self._command_cache.get(cmd_name)
-        if cached is not None:
-            return cached
-
         entry = get_command_entry(cmd_name)
         if entry is None:
             return None
 
-        _initialize_command_tls()
+        if not ctx.meta.get("apm_command_tls_initialized"):
+            _initialize_command_tls()
+            ctx.meta["apm_command_tls_initialized"] = True
+
+        cached = self._command_cache.get(cmd_name)
+        if cached is not None:
+            return cached
+
         module = import_module(entry.module)
         command = getattr(module, entry.attribute)
         if not isinstance(command, click.Command):
